@@ -27,7 +27,7 @@ redefinition; `Revise.jl`-mediated redefinition during interactive
 development is a separate, not-yet-checked case, so this claim is
 explicitly scoped to non-Revise sessions.
 
-## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator)
+## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator) + v1.4 (parametric structs)
 
 | Concept | This port |
 |---|---|
@@ -40,19 +40,36 @@ explicitly scoped to non-Revise sessions.
 | `_try_inline_call` (cpython-asr v1.1) | `AsrTransform.try_inline_helper` - one-level inlining of a single-method helper whose ORIGINAL source `Expr` is recovered via `functionloc` + re-reading and re-parsing its source file (the same reflection `inspect.getsource` performs - Julia macros only see the Expr they're applied to, not the whole module, so there's no `parse_transform`-style Forms list to scan the helper from) |
 | `_try_branch_reconstruction` (cpython-asr v1.2) | `AsrTransform.classify_branch_tree` - unlike BEAM-asr (free via clause dispatch), a `while` loop has one body block, so an `if`/`elseif`/`else` statement needed genuine new tree-walking/tree-rewriting code, with a mandatory terminal else |
 | Multi-accumulator fixpoint (cpython-asr v1.2) | `AsrTransform.find_and_classify_accumulators` - every candidate position qualifies fully independently (cross-accumulator field reads are already tolerated for free), combined via a cross-accumulator collision check and a `subs`-list substitution fold (`subst_all`) threaded through every rewrite function so one accumulator's reconstruction can read another's fields directly |
+| Parametric structs (v1.4, corpus-study finding) | `try_accumulator_stmt` unwraps a `UnionAll` (e.g. `InetAddr{T<:IPAddr}`) via `Base.unwrap_unionall` before checking `isstructtype`/`ismutabletype`/`fieldnames` - field shape is fixed by the struct's own declaration, never by which concrete type parameter a given call instantiates, so nothing else in the module needed to change: `typename` was already a bare Symbol everywhere, and the reconstruction call this transform emits is the same syntactic shape (`TypeName(args...)`) the original code used, letting Julia's own type-parameter inference resolve it identically either way. Requires the bare-call form (`Paramed(...)`); an explicit `Paramed{Float64}(...)` still declines, since the constructor callee is then an `Expr(:curly,...)`, not a Symbol |
 
-Explicitly deferred to v1.4+: `for` loops as an alternative to `while`;
-mutable structs / direct field-mutation mode (`cpython-asr`'s v1.4
-analog); two-level (chained) interprocedural inlining; intra-clause
-`case`/`if` guarding a reconstruction that isn't itself the whole
-branch-shaped statement; parametric structs (`T isa DataType` required,
-a deliberate exclusion, not an accident); a `while` loop wrapped in a
-performance macro like `@inbounds`/`@simd`/`@fastmath`.
+Motivated directly by `corpus-study/README.md`'s own finding:
+parametric structs were the single largest exclusion in real code (10
+of 15 record-shaped hits found across Julia's entire Base + a 12-module
+stdlib slice). `Sockets.listenany`'s `InetAddr` retry loop is the
+corpus's cleanest example - though it still declines post-fix, for an
+unrelated, second reason (see below).
+
+Explicitly deferred: `for` loops as an alternative to `while`; mutable
+structs / direct field-mutation mode (`cpython-asr`'s v1.4 analog, 3 of
+15 corpus-study hits); two-level (chained) interprocedural inlining; a
+`while` loop wrapped in a performance macro like
+`@inbounds`/`@simd`/`@fastmath`. Also newly identified, not yet fixed:
+`classify_loop` dispatches *any* top-level `if` statement in the loop
+body to `classify_branch_tree` unconditionally, without first checking
+whether its leaves actually reference the accumulator's own
+reconstruction - so an early-return guard clause with no terminal
+`else` (a common, unrelated-to-the-accumulator idiom) can decline a
+loop before its *real* reconstruction, appearing later in the body, is
+ever examined. This is exactly what still blocks `Sockets.listenany`
+after the v1.4 fix above: its loop's first statement is
+`if bind(sock,addr) && ... ; return ...; end` (no `else`), and
+`addr = InetAddr(addr.host, addr.port+1)` - the genuine reconstruction
+- never gets reached.
 
 ## Layout
 
 - `src/AsrTransform.jl` - the `@asr` macro entry point, qualification (phase 1), and rewrite (phase 2)
-- `test/runtests.jl` - `Test`-based tests, 14 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, plus a structural check) and 23 negative/abort-safe cases - see the module docstring and test file for the full list
+- `test/runtests.jl` - `Test`-based tests, 15 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, parametric struct, plus a structural check) and 24 negative/abort-safe cases - see the module docstring and test file for the full list
 - `benchmarks/` - all 14 benchmarks from the paper's Table 1, ported from FOL's `benchmarks/fol-code/asr-*.fol`; see `benchmarks/README.md` for results, including two genuinely different findings from the other ports: near-zero measured speedup for 13 of 14 (Julia's own JIT already eliminates the allocation), and a measured *regression* (0.87x) for Kalman specifically, where ASR's own temp-staging overhead outweighs an allocation win that was already free
 - `corpus-study/` - a shape-recognizing analyzer run against Julia 1.10's *entire* Base plus 12 stdlib modules (365 files, 272K LOC - small enough to cover exhaustively, unlike the other ports' own sampled corpora), measuring ASR candidate-loop density and hand-auditing why all 15 record-shaped hits found decline; see `corpus-study/README.md`
 

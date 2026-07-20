@@ -10,7 +10,26 @@ corpus study (`../../FOL/fol/docs/cgo2027/corpus-study/`),
 upper-bound proxy) followed by a gate-faithful Pass 2 that runs the
 *real* `AsrTransform.rewrite_function` as a black-box oracle - the same
 entry point `@asr` itself calls, never a re-implementation that could
-drift from the actual v1–v1.3 rules.
+drift from the actual v1–v1.4 rules.
+
+**Update (v1.4)**: this study's own finding - parametric structs were
+the single largest exclusion in real code (10 of 15 hits) - was fed
+back into `AsrTransform.jl` as a targeted fix (unwrap a `UnionAll` via
+`Base.unwrap_unionall` before checking `isstructtype`/`ismutabletype`/
+`fieldnames`; see `README.md`'s Status table). **Re-running this exact
+study against the updated transform still shows 0 of 15 qualifying** -
+not a bug: `Sockets.listenany`, the corpus's one clean example, now
+clears type resolution (confirmed directly - `try_accumulator_stmt`
+succeeds) but declines for a second, independent, previously-invisible
+reason: its loop body's first statement is an `if` with no terminal
+`else` (an early-return guard clause, unrelated to the accumulator),
+and `classify_loop` dispatches *any* top-level `if` to
+`classify_branch_tree` unconditionally - so it never reaches the
+genuine reconstruction (`addr = InetAddr(addr.host, addr.port+1)`)
+appearing later in the same loop body. The numbers below reflect the
+re-run; the categorization table further down is kept as originally
+written (what motivated the fix) with a "Status" column added noting
+what's now fixed vs. still open.
 
 **A real methodological difference from the sibling studies, not just a
 smaller number**: Erlang/OTP and the Python package ecosystem are both
@@ -143,22 +162,24 @@ the actual cause, following up in each type's own defining module when
 the corpus's own module-resolution choice wasn't the right one to
 check in:
 
-| Category | Count | Sites | Reason |
-|---|---|---|---|
-| **Parametric struct** | 10 | `RefValue`×3 (`pwd`, `tempdir`, `homedir`), `IOContext`×2 (`point_to_line`), `Ref`×2 (`parse_array`, `unicode.jl::iterate`), `InetAddr`×1 (`Sockets.listenany`), `REPLDisplay`×2 (`REPL.run_frontend`) | `resolve_type` returns a `UnionAll` (e.g. `Base.RefValue{T}`, `Sockets.InetAddr{T<:IPAddr}`), not a `DataType` - `T isa DataType` fails by design (`README.md`'s own "a deliberate exclusion, not an accident"). |
-| **Mutable struct** | 3 | `IOBuffer`×1 (`REPL.normalize_key`), `TOMLDict`×1 (`= Dict{String,Any}`, `parse_inline_table`), `ParseStream`×1 (`mutable struct ParseStream`, JuliaSyntax) | `ismutabletype(T)` is true - Julia-asr has no mutation mode (`cpython-asr`'s v1.4 analog, unimplemented here). `TOMLDict`/`ParseStream` initially reported "doesn't resolve" because the corpus scan checks types in `Base` directly, not their own vendored submodule (`Base.TOML`, `Base.JuliaSyntax`) - confirmed by direct definition lookup (`TOMLDict = Dict{String,Any}`; `mutable struct ParseStream`) that both land on this same wall once resolved correctly, not a third category. |
-| **Pass-1 syntactic false positive: method type parameter** | 1 | `T` (`intfuncs.jl::binomial`, `rr = T(2)`) | `T` here is a `where T` method type parameter, not a module-level type binding - `T(2)` is syntactically identical to a type-constructor call, but `Core.eval(Base, :T)` is an `UndefVarError`. A Pass-1 imprecision (no signature-tracking), not a transform finding - mirrors BEAM-asr's own "record_weak is deliberately loose" caveat. |
-| **Genuine non-parametric, non-mutable struct - declines for an unrelated loop-shape reason** | 1 | `SummarySize` (`summarysize.jl::summarysize`) | The one candidate that clears type resolution entirely. `ss = SummarySize(IdDict(), Any[], Int[], exclude, chargeall)` is never reassigned inside the loop - only its own *mutable-array fields* (`ss.frontier_x`, `ss.frontier_i`) are grown/shrunk via `push!`/`pop!` (a DFS/BFS worklist), the same "stateful helper object mutated via its own container fields" idiom found repeatedly among the `record_other`-then-excluded hits below. Declines with `"no candidate accumulator qualified"` - `classify_loop` never finds a reconstruction assignment for `ss` at all. |
+| Category | Count | Sites | Reason | Status |
+|---|---|---|---|---|
+| **Parametric struct** | 10 | `RefValue`×3 (`pwd`, `tempdir`, `homedir`), `IOContext`×2 (`point_to_line`), `Ref`×2 (`parse_array`, `unicode.jl::iterate`), `InetAddr`×1 (`Sockets.listenany`), `REPLDisplay`×2 (`REPL.run_frontend`) | `resolve_type` returned a `UnionAll` (e.g. `Base.RefValue{T}`, `Sockets.InetAddr{T<:IPAddr}`), not a `DataType` - `T isa DataType` failed by design (a deliberate v1-v1.3 exclusion). | **Fixed in v1.4** - `try_accumulator_stmt` now unwraps the `UnionAll` first. `RefValue`/`IOContext`/`Ref`/`REPLDisplay` are *also* mutable, so they still correctly decline on that separate wall; `InetAddr` alone clears type resolution, confirmed directly, but still declines for the unrelated `if`-dispatch reason described above. |
+| **Mutable struct** | 3 | `IOBuffer`×1 (`REPL.normalize_key`), `TOMLDict`×1 (`= Dict{String,Any}`, `parse_inline_table`), `ParseStream`×1 (`mutable struct ParseStream`, JuliaSyntax) | `ismutabletype(T)` is true - Julia-asr has no mutation mode (`cpython-asr`'s v1.4 analog, unimplemented here). `TOMLDict`/`ParseStream` initially reported "doesn't resolve" because the corpus scan checks types in `Base` directly, not their own vendored submodule (`Base.TOML`, `Base.JuliaSyntax`) - confirmed by direct definition lookup (`TOMLDict = Dict{String,Any}`; `mutable struct ParseStream`) that both land on this same wall once resolved correctly, not a third category. | Unaffected by v1.4 - still correctly declines; unimplemented mutation mode is a separate, structurally bigger feature (see below). |
+| **Pass-1 syntactic false positive: method type parameter** | 1 | `T` (`intfuncs.jl::binomial`, `rr = T(2)`) | `T` here is a `where T` method type parameter, not a module-level type binding - `T(2)` is syntactically identical to a type-constructor call, but `Core.eval(Base, :T)` is an `UndefVarError`. A Pass-1 imprecision (no signature-tracking), not a transform finding - mirrors BEAM-asr's own "record_weak is deliberately loose" caveat. | Unaffected by v1.4 - not a real transform limitation. |
+| **Genuine non-parametric, non-mutable struct - declines for an unrelated loop-shape reason** | 1 | `SummarySize` (`summarysize.jl::summarysize`) | The one candidate that clears type resolution entirely. `ss = SummarySize(IdDict(), Any[], Int[], exclude, chargeall)` is never reassigned inside the loop - only its own *mutable-array fields* (`ss.frontier_x`, `ss.frontier_i`) are grown/shrunk via `push!`/`pop!` (a DFS/BFS worklist), the same "stateful helper object mutated via its own container fields" idiom found repeatedly among the `record_other`-then-excluded hits below. Declines with `"no candidate accumulator qualified"` - `classify_loop` never finds a reconstruction assignment for `ss` at all. | Unaffected by v1.4 - genuinely not an ASR accumulator loop, no fix applies. |
 
 **13 of 15 (87%) hit one of Julia-asr's own already-documented v1-v1.3
 exclusions** (parametric or mutable structs) - this corpus doesn't
 surface a new gap so much as it *confirms*, against real code, that
 those two documented boundaries are the actual reason a real
 record-shaped loop declines when one occurs at all. `Sockets.listenany`
-is the cleanest example: a genuine port-retry loop,
+was the cleanest example: a genuine port-retry loop,
 `addr = InetAddr(addr.host, addr.port + UInt16(1))` reconstructed once
-per attempt - textbook ASR shape - blocked entirely by `InetAddr`'s own
-parametric type parameter.
+per attempt - textbook ASR shape. Parametric-struct support (v1.4,
+below) has since removed that specific block, but `listenany` still
+declines, for the unrelated `classify_loop` if-dispatch reason
+described in "What would unlock the most real code."
 
 ### The dominant pattern behind the *other* false positives: mutable helper objects, not reconstructed records
 
@@ -223,26 +244,41 @@ independent of whether `@asr` could handle it.
 
 ## What would unlock the most real code
 
-Parametric-struct support is the single highest-leverage extension
-this study points to: it alone accounts for 10 of 15 hits (67%),
-including the corpus's one clean, otherwise-textbook `record_strong`
-example (`Sockets.listenany`). Concretely, this would mean relaxing
-`try_accumulator_stmt`'s `T isa DataType` requirement to also accept a
-`UnionAll` resolved to a concrete instantiation via the constructor
-call's own argument types (Julia's own method-dispatch machinery
-already does this resolution on every call; the question is just
-whether `try_accumulator_stmt` can determine field names/count without
-a *specific* instantiation in hand, since `fieldnames`/`fieldcount` are
-generic-safe but need `Base.datatype_fieldcount`-style care for a
-`UnionAll` rather than a concrete `DataType`). Not attempted in this
-session - a natural next step if pursued.
+**Parametric-struct support was implemented in v1.4** (`try_accumulator_stmt`
+now unwraps a `UnionAll` via `Base.unwrap_unionall` before its type
+checks - see `README.md`'s Status table for the full change).
+Re-running this exact study against the fix confirms it works exactly
+as intended - `InetAddr` now clears type resolution, verified directly
+- but moved the needle on **zero** additional real-world qualifications
+in this specific corpus, because `Sockets.listenany` (the one clean
+candidate this fix could have unlocked) hits a second, independent,
+previously-invisible wall: `classify_loop` dispatches *any* top-level
+`if` statement in the loop body to `classify_branch_tree`
+unconditionally, without first checking whether that `if`'s own leaves
+reference the accumulator's reconstruction at all - so `listenany`'s
+early-return guard clause (`if bind(sock,addr) && ...; return ...; end`,
+no terminal `else`) declines the whole loop before its *actual*
+reconstruction, appearing later in the same loop body as a plain
+top-level statement, is ever reached. This mirrors the exact shape of
+finding from the BEAM-asr/CGO project's own iterative
+corpus-study-then-fix cycle: a targeted fix can be fully correct and
+still not move a headline number, because real code stacks more than
+one qualification-blocking idiom in the same function. **The
+`classify_loop` if-dispatch issue is now the study's own
+highest-leverage next target** - fixing it would require `classify_loop`
+to try ordinary (direct/inline) reconstruction detection across *all*
+top-level statements first, falling back to branch-tree classification
+for an `if` only when it's the *sole* remaining candidate statement
+(or, more conservatively, only when at least one of its leaves
+syntactically resembles a reconstruction) - not attempted in this
+session.
 
 Mutable-struct support (Julia-asr's own analog of `cpython-asr`'s v1.4
-mutation mode) would be the second-highest-leverage extension (3 of 15
-hits here), but is a structurally bigger change: unlike reconstruction,
-which only ever needs to track the *current* scalar values, in-place
-mutation requires escape analysis (does the mutated struct alias
-anything the transform can't see?) that this corpus's own hits
-(`IOBuffer`, `TOMLDict`, `ParseStream`) don't obviously simplify, since
-none of them are single-owner, non-escaping mutation in the way a
-freshly-constructed local accumulator naturally is.
+mutation mode) remains the other real, structurally bigger extension (3
+of 15 hits here): unlike reconstruction, which only ever needs to track
+the *current* scalar values, in-place mutation requires escape analysis
+(does the mutated struct alias anything the transform can't see?) that
+this corpus's own hits (`IOBuffer`, `TOMLDict`, `ParseStream`) don't
+obviously simplify, since none of them are single-owner, non-escaping
+mutation in the way a freshly-constructed local accumulator naturally
+is.

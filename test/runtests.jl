@@ -375,6 +375,38 @@ end
     return s.x
 end
 
+struct Paramed{T}
+    x::T
+    y::T
+end
+
+# v1.4: a parametric struct accumulator - `Paramed(...)` (bare, no
+# explicit `{T}` type application) lets Julia infer T from the
+# constructor's own argument types, the same shape found in real code
+# by the corpus study (Sockets.listenany's `InetAddr(host,
+# default_port)`). An explicit `Paramed{Float64}(...)` call would NOT
+# qualify - `try_accumulator_stmt` requires the constructor callee be a
+# bare Symbol, not an `Expr(:curly, ...)`.
+function plain_paramed(n)
+    p = Paramed(0.0, 0.0)
+    i = 0
+    while i < n
+        p = Paramed(p.x + 1.0, p.y + 2.0)
+        i += 1
+    end
+    return p.x + p.y
+end
+
+@asr function asr_paramed(n)
+    p = Paramed(0.0, 0.0)
+    i = 0
+    while i < n
+        p = Paramed(p.x + 1.0, p.y + 2.0)
+        i += 1
+    end
+    return p.x + p.y
+end
+
 @testset "AsrTransform positive cases" begin
     @test plain_full(1000) == asr_full(1000)
     @test plain_partial(500) == asr_partial(500)
@@ -388,6 +420,7 @@ end
     @test plain_branch_2way(500) == asr_branch_2way(500)
     @test plain_multi_symmetric(1000) == asr_multi_symmetric(1000)
     @test plain_multi_asymmetric(1000) == asr_multi_asymmetric(1000)
+    @test plain_paramed(1000) == asr_paramed(1000)
 
     # Structural check: qualification fired iff the rewritten Expr no
     # longer contains a `Point(...)` reconstruction call inside the loop.
@@ -418,7 +451,11 @@ mutable struct MPoint
     y
 end
 
-struct Paramed{T}
+# v1.4: a parametric AND mutable struct - confirms the parametric-struct
+# fix composes correctly with the pre-existing mutable-struct exclusion
+# (unwrap first, then the SAME `!ismutabletype` check as ever) rather
+# than accidentally bypassing it.
+mutable struct MParamed{T}
     x::T
     y::T
 end
@@ -520,12 +557,31 @@ end
         @test run_mutable_decline(10) == 30.0
     end
 
-    @testset "parametric struct accumulator" begin
+    @testset "parametric AND mutable struct accumulator" begin
         ex = :(function f(n)
-            p = Paramed(0.0, 0.0)
+            p = MParamed(0.0, 0.0)
             i = 0
             while i < n
-                p = Paramed(p.x + 1.0, p.y + 2.0)
+                p = MParamed(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "parametric struct, explicit type application" begin
+        # `Paramed{Float64}(...)` - the constructor callee is
+        # `Expr(:curly, :Paramed, :Float64)`, not a bare Symbol, so
+        # `try_accumulator_stmt` declines before type resolution even
+        # runs. The bare-call form (`Paramed(...)`, letting Julia infer
+        # T) is the one v1.4 supports - see "AsrTransform positive
+        # cases"'s plain_paramed/asr_paramed pair above.
+        ex = :(function f(n)
+            p = Paramed{Float64}(0.0, 0.0)
+            i = 0
+            while i < n
+                p = Paramed{Float64}(p.x + 1.0, p.y + 2.0)
                 i += 1
             end
             return p.x + p.y

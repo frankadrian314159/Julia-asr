@@ -13,7 +13,26 @@ interprocedural inlining (`try_inline_helper`); v1.2 adds branch-shaped
 reconstruction (`classify_branch_tree` - unlike BEAM-asr's clause
 dispatch, this needed genuine new code, since a `while` loop has only
 one body block); v1.3 adds multi-accumulator support
-(`find_and_classify_accumulators`, `subst_all`). See Julia-asr design
+(`find_and_classify_accumulators`, `subst_all`); v1.4 adds parametric
+struct support (`try_accumulator_stmt` unwraps a `UnionAll` via
+`Base.unwrap_unionall` before checking `isstructtype`/`ismutabletype`/
+`fieldnames` - field shape is fixed by the struct's own declaration,
+never by which concrete type parameter a given call instantiates, so
+this needs no other change: `typename` stays a bare Symbol everywhere
+else, and the reconstruction call this transform emits is the exact
+syntactic shape the original code already used, letting Julia's own
+type-parameter inference resolve it identically either way). Found by
+the corpus study (`corpus-study/README.md`) to be the single
+highest-leverage exclusion in real code - `Sockets.listenany`'s
+`InetAddr{T<:IPAddr}` retry loop is the corpus's cleanest example,
+though it still declines for an unrelated, second reason: its loop
+body's first statement is an `if` with no terminal `else` (an
+early-return guard clause, not an attempted reconstruction of the
+accumulator at all), and `classify_loop` dispatches to
+`classify_branch_tree` for *any* top-level `if` unconditionally,
+without first checking whether its leaves reference the accumulator's
+own reconstruction shape - not fixed here, a distinct, separately
+scoped issue from parametric-struct support. See Julia-asr design
 notes for the full qualification/rewrite spec this module implements.
 
 No world-guard mechanism is needed (unlike FOL and cpython-asr): Julia
@@ -130,9 +149,27 @@ strip_linenums(exprs) = [e for e in exprs if !(e isa LineNumberNode)]
 # -----------------------------------------------------------------------
 
 """Returns `(varname, typename, fields)` if `s` is `varname =
-TypeName(args...)` where TypeName resolves to a defined, non-parametric,
-immutable struct whose field count matches the (purely positional)
-constructor call, else `nothing`."""
+TypeName(args...)` where TypeName resolves to a defined immutable
+struct (parametric or not) whose field count matches the (purely
+positional) constructor call, else `nothing`.
+
+v1.4: a parametric struct (`resolve_type` returns a `UnionAll`, e.g.
+`InetAddr{T<:IPAddr}`) is unwrapped via `Base.unwrap_unionall` before
+checking `isstructtype`/`ismutabletype`/`fieldnames` - field names and
+count are fixed by the struct's own declaration, never by which
+concrete type parameter a given call instantiates, so this is safe for
+any instantiation without knowing which one applies. `typename` itself
+stays a bare Symbol throughout the rest of this module (qualification
+and rewrite alike) - the reconstruction call this transform emits is
+the exact same syntactic shape (`TypeName(scalar1, scalar2, ...)`) the
+original code already used, and Julia's own type-parameter inference
+from argument types resolves it identically either way; nothing here
+ever needs the concrete instantiated type itself, only its field
+shape. Confirmed against real code: `Sockets.listenany`'s
+`InetAddr(addr.host, addr.port + 1)` retry loop, found by the corpus
+study (`corpus-study/README.md`) as the corpus's one clean
+`record_strong` example, blocked on exactly this check before this
+fix."""
 function try_accumulator_stmt(s, mod::Module)
     (Meta.isexpr(s, :(=)) && length(s.args) == 2) || return nothing
     lhs, rhs = s.args
@@ -144,8 +181,9 @@ function try_accumulator_stmt(s, mod::Module)
     any(a -> Meta.isexpr(a, :kw) || Meta.isexpr(a, :...) || Meta.isexpr(a, :parameters), ctor_args) && return nothing
     T = resolve_type(mod, typename)
     T === nothing && return nothing
-    (T isa DataType && isstructtype(T) && !ismutabletype(T)) || return nothing
-    fields = collect(fieldnames(T))
+    T_body = T isa UnionAll ? Base.unwrap_unionall(T) : T
+    (T_body isa DataType && isstructtype(T_body) && !ismutabletype(T_body)) || return nothing
+    fields = collect(fieldnames(T_body))
     length(ctor_args) == length(fields) || return nothing
     return (lhs, typename, fields)
 end
