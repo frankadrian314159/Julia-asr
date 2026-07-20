@@ -235,6 +235,48 @@ depth-generalization itself is real, tested, shipped capability - it
 simply doesn't happen to be what this corpus's own remaining candidates
 need.
 
+**Update (v1.9)**: mutation-awareness itself - the extension v1.8's own
+update explicitly named and deferred - was built next.
+`try_accumulator_stmt` no longer rejects mutable structs;
+`classify_loop_mutable` recognizes direct field mutation (`p.x =
+expr`/`p.x += expr`, at the loop body's own top level -
+`cpython-asr`'s v1.4 analog) as an alternative to whole-object
+reconstruction. Building it surfaced a real, previously-LATENT
+soundness gap in `check_only_field_reads`, dormant since v1.6 only
+because mutable types were categorically unreachable before now:
+`is_field_read`'s shape match (`Expr(:., varname, QuoteNode(f))`)
+doesn't distinguish read from write context, so a callee that
+genuinely MUTATES a field could have been wrongly verified "safe
+read-only" by `verify_safe_passthrough_arg` - whose rewrite re-boxes a
+fresh, throwaway copy and discards it after the call, which would have
+silently dropped any real mutation. Closed by having
+`check_only_field_reads` explicitly reject any field-write shape it
+wasn't specifically asked to tolerate; `classify_loop_mutable` is the
+only place that positively recognizes one, and only at the loop's own
+top level, never through an opaque-call passthrough (v1.9 deliberately
+does not attempt mutation-aware INTERPROCEDURAL summaries - that
+remains the larger, not-yet-attempted extension). No separate
+escape-analysis pass was needed to make mutation itself sound: the
+"decline on any untracked bare occurrence" discipline already in place
+since v1 already guarantees the accumulator never aliases anywhere
+unverified.
+
+**Investigated before implementing, not assumed - and confirmed twice,
+independently.** The same 7 real declining candidates sampled to
+answer "would mutable-struct support help" (see below) were checked
+again for this question: zero of them use direct field mutation
+anywhere. Re-running the corpus study with real mutation-mode
+qualification found **zero additional qualifying candidates** - and,
+independently, Pass 1's OWN `record_mutate` candidate kind (a
+mutation-shaped pre-loop init, distinct from `record_strong`/
+`record_weak`'s reconstruction shape - see the analyzer table below)
+has **zero hits across the entire 272,688-LOC corpus**, a second,
+completely independent confirmation from the opposite direction (a
+syntactic scan, not a targeted sample) of the same finding. v1.9 is
+real, sound, fully tested capability - not dead code - it simply isn't
+what this specific corpus's own remaining candidates need, for the
+exact reason predicted before it was built.
+
 **A real methodological difference from the sibling studies, not just a
 smaller number**: Erlang/OTP and the Python package ecosystem are both
 far too large to scan exhaustively, so BEAM-asr and cpython-asr each
@@ -335,9 +377,16 @@ Files scanned OK: 365 / 365
 Total LOC: 272,688
 Total loop sites (functions with >=1 while/for): 1,809
 Loop-site shape breakdown: single_while=254  single_for=697  has_for=772  mixed=66  multi_while=20
-Record-shaped candidate positions: 160
-Gate-faithful qualification: qualified=1  declined=159  error=0
+Record-shaped candidate positions: 247
+Gate-faithful qualification: qualified=1  declined=246  error=0
 ```
+
+(247 = 160 from `single_while`/`single_for`, the two shapes Pass 1 does
+a full field-shape scan for, plus 87 more from a separate, cheaper,
+exploratory-only scan of the remaining `multi_while`/`has_for`/`mixed`
+bucket - see "Would multi-loop support help?" below. `AsrTransform`
+itself has no multi-loop qualification path, so those 87 all decline
+at Pass 2 regardless of what v1.4-v1.9 built.)
 
 **Headline finding #1, before the record-shape question is even
 reached: `for` loops overwhelmingly dominate Julia's own idiomatic
@@ -471,7 +520,7 @@ independent of whether `@asr` could handle it.
   all (confirmed directly, not inferred, across every domain sampled)
   - rather than the specific immutable-record-rebuilt-via-loop pattern
   the transform recognizes; but where that shape genuinely occurs,
-  v1.4-v1.8 show the transform can be pushed, with real (not
+  v1.4-v1.9 show the transform can be pushed, with real (not
   speculative) fixes, all the way to actually handling it.
 
 ## Three real, verified fixes - one net new qualification, and the trail that got there

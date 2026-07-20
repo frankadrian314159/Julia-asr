@@ -135,6 +135,42 @@ this call write into the object, and does that observably escape?), a
 materially different and larger extension than depth-generalizing an
 already-supported read-only shape.
 
+v1.9 adds that mutation-awareness, in the scope it's actually sound
+for: `try_accumulator_stmt` no longer rejects mutable structs
+(`ismutable` is returned rather than used as an exclusion), and a
+mutable candidate routes to `classify_loop_mutable` instead of
+`classify_loop` - direct field mutation (`p.x = expr`/`p.x += expr`,
+`cpython-asr`'s v1.4 analog) rather than whole-object reconstruction.
+Building this surfaced a real, previously-LATENT soundness gap in
+`check_only_field_reads`, dormant since v1.6 only because mutable types
+were categorically unreachable before now: `is_field_read`'s shape
+match (`Expr(:., varname, QuoteNode(f))`) doesn't distinguish read from
+write context, so a callee that MUTATES a field would have been
+wrongly verified "safe read-only" by `verify_safe_passthrough_arg` -
+whose rewrite re-boxes a fresh, throwaway copy and discards it after
+the call, silently dropping any real mutation. `check_only_field_reads`
+now explicitly rejects any field-write shape (`is_field_mutation`) it
+encounters; `classify_loop_mutable` is the only place that positively
+recognizes one, and only at the loop body's own top level (not nested
+inside an `if`, and never through an opaque-call passthrough - v1.9
+deliberately does not attempt mutation-aware interprocedural summaries,
+the larger extension flagged above). No separate escape-analysis pass
+was needed to make mutation sound: the existing "decline on any
+untracked bare occurrence" discipline, in place since v1, already
+guarantees the accumulator never aliases anywhere unverified.
+
+Investigated before implementing, not assumed: direct field mutation
+was checked against 7 real corpus-declining candidates across every
+domain sampled (Base arrays, Base compiler internals, REPL,
+JuliaSyntax, LinearAlgebra) and found in ZERO of them - idiomatic Julia
+mutates through opaque method calls almost universally, not bare
+`p.field = expr`. Confirmed again, independently, corpus-wide: Pass 1's
+own `record_mutate` candidate-kind (mutation-shaped pre-loop inits) has
+zero hits across the entire 272K-LOC corpus. v1.9 is real, sound, fully
+tested capability - not dead code - but this specific corpus's own
+remaining candidates need the larger extension (mutation-aware
+interprocedural summaries), not this one.
+
 See Julia-asr design notes for the full qualification/rewrite spec
 this module implements.
 
@@ -253,7 +289,20 @@ never has, since `while` introduces no new binding at all) decline
 just that ONE candidate, the same way any other per-candidate
 `classify_loop` failure does, rather than crashing on the ambiguity or
 silently misattributing loop-variable references as accumulator
-references."""
+references. v1.9: `try_accumulator_stmt` now also matches MUTABLE
+struct inits (returning a 4th `ismutable` element); a mutable candidate
+routes to `classify_loop_mutable` instead of `classify_loop` - direct
+field mutation (`p.x = expr`/`p.x += expr`) rather than whole-object
+reconstruction, `cpython-asr`'s v1.4 analog. The two paths are kept
+strictly separate rather than merged into one, because they need
+different SAFETY rules, not just different SHAPE rules: reconstruction
+is always sound regardless of whether `p` is aliased elsewhere (a
+fresh object every iteration can never make stale aliases observe a
+change), but mutation is only sound if `p` never escapes anywhere
+unverified - which the existing `check_only_field_reads` safety net
+already guarantees for free (it already declines on ANY untracked bare
+occurrence, mutable types included), so no separate escape-analysis
+pass was needed to make this sound."""
 function find_and_classify_accumulators(pre_stmts, header, loop_stmts, post_stmts, mod::Module,
                                           loop_kind::Symbol, loopvar)
     candidates = Any[]
@@ -264,11 +313,15 @@ function find_and_classify_accumulators(pre_stmts, header, loop_stmts, post_stmt
     isempty(candidates) && throw(AsrDecline("no candidate accumulator found in pre-loop statements"))
 
     plans = Any[]
-    for (varname, typename, fields) in candidates
+    for (varname, typename, fields, ismutable) in candidates
         plan = try
             loop_kind === :for && loopvar === varname &&
                 throw(AsrDecline("accumulator name shadowed by the for-loop's own iteration variable"))
-            recon = classify_loop(header, loop_stmts, varname, typename, fields, mod)
+            recon = if ismutable
+                classify_loop_mutable(header, loop_stmts, varname, typename, fields, mod)
+            else
+                classify_loop(header, loop_stmts, varname, typename, fields, mod)
+            end
             classify_post(post_stmts, varname, fields, typename, mod)
             scalar_names = Dict(f => scalar_name(varname, f) for f in fields)
             tmp_names = Dict(f => tmp_name(varname, f) for f in fields)
@@ -297,28 +350,34 @@ strip_linenums(exprs) = [e for e in exprs if !(e isa LineNumberNode)]
 # Phase 1: qualification
 # -----------------------------------------------------------------------
 
-"""Returns `(varname, typename, fields)` if `s` is `varname =
-TypeName(args...)` where TypeName resolves to a defined immutable
-struct (parametric or not) whose field count matches the (purely
-positional) constructor call, else `nothing`.
+"""Returns `(varname, typename, fields, ismutable)` if `s` is `varname =
+TypeName(args...)` where TypeName resolves to a defined struct
+(mutable or not, parametric or not) whose field count matches the
+(purely positional) constructor call, else `nothing`.
 
 v1.4: a parametric struct (`resolve_type` returns a `UnionAll`, e.g.
 `InetAddr{T<:IPAddr}`) is unwrapped via `Base.unwrap_unionall` before
-checking `isstructtype`/`ismutabletype`/`fieldnames` - field names and
-count are fixed by the struct's own declaration, never by which
-concrete type parameter a given call instantiates, so this is safe for
-any instantiation without knowing which one applies. `typename` itself
-stays a bare Symbol throughout the rest of this module (qualification
-and rewrite alike) - the reconstruction call this transform emits is
-the exact same syntactic shape (`TypeName(scalar1, scalar2, ...)`) the
-original code already used, and Julia's own type-parameter inference
-from argument types resolves it identically either way; nothing here
-ever needs the concrete instantiated type itself, only its field
-shape. Confirmed against real code: `Sockets.listenany`'s
-`InetAddr(addr.host, addr.port + 1)` retry loop, found by the corpus
-study (`corpus-study/README.md`) as the corpus's one clean
-`record_strong` example, blocked on exactly this check before this
-fix."""
+checking `isstructtype`/`fieldnames` - field names and count are fixed
+by the struct's own declaration, never by which concrete type parameter
+a given call instantiates, so this is safe for any instantiation
+without knowing which one applies. `typename` itself stays a bare
+Symbol throughout the rest of this module (qualification and rewrite
+alike) - the reconstruction call this transform emits is the exact
+same syntactic shape (`TypeName(scalar1, scalar2, ...)`) the original
+code already used, and Julia's own type-parameter inference from
+argument types resolves it identically either way; nothing here ever
+needs the concrete instantiated type itself, only its field shape.
+Confirmed against real code: `Sockets.listenany`'s `InetAddr(addr.host,
+addr.port + 1)` retry loop, found by the corpus study
+(`corpus-study/README.md`) as the corpus's one clean `record_strong`
+example, blocked on exactly this check before this fix.
+
+v1.9: mutable structs are no longer rejected here - `ismutable` is
+returned instead of used as an exclusion, and `find_and_classify_accumulators`
+routes a mutable candidate to `classify_loop_mutable` (direct field
+mutation) rather than `classify_loop` (whole-object reconstruction),
+since the two need different SAFETY rules, not just different shape
+rules (see `classify_loop_mutable`'s own docstring)."""
 function try_accumulator_stmt(s, mod::Module)
     (Meta.isexpr(s, :(=)) && length(s.args) == 2) || return nothing
     lhs, rhs = s.args
@@ -331,10 +390,10 @@ function try_accumulator_stmt(s, mod::Module)
     T = resolve_type(mod, typename)
     T === nothing && return nothing
     T_body = T isa UnionAll ? Base.unwrap_unionall(T) : T
-    (T_body isa DataType && isstructtype(T_body) && !ismutabletype(T_body)) || return nothing
+    (T_body isa DataType && isstructtype(T_body)) || return nothing
     fields = collect(fieldnames(T_body))
     length(ctor_args) == length(fields) || return nothing
-    return (lhs, typename, fields)
+    return (lhs, typename, fields, ismutabletype(T_body))
 end
 
 function resolve_type(mod::Module, typename::Symbol)
@@ -395,6 +454,48 @@ function classify_loop(header, loop_stmts, varname, typename, fields, mod::Modul
     check_only_field_reads(header, varname, fields, typename, mod)
     length(recons) == 1 || throw(AsrDecline("expected exactly one reconstruction assignment in loop body"))
     return recons[1]
+end
+
+"""v1.9: the mutable-accumulator analog of `classify_loop` - direct
+field mutation (`varname.f = expr`/`varname.f += expr`, see
+`is_field_mutation`) rather than whole-object reconstruction. Declines
+if `varname` is ever reassigned as a WHOLE variable anywhere in the
+loop (`varname = ...` - a different, more complex case: re-binding the
+accumulator to a possibly-different object entirely, not in scope
+here) or if no field mutation is found at all (nothing would actually
+be updated). Every OTHER occurrence of `varname` - reads, or a
+verified-safe read-only opaque-call passthrough (v1.6/v1.8, unchanged)
+- goes through the ordinary `check_only_field_reads`, which now
+explicitly rejects any field-WRITE shape it encounters (so a mutation
+nested inside an `if`/`for`/opaque call, rather than at the loop
+body's own top level, correctly declines rather than being silently
+mishandled - v1.9 scope is deliberately limited to top-level mutation
+statements, mirroring the "start simple" discipline used throughout
+this module). Returns `(kind=:mutate,)` - unlike every other `recon`
+kind, there is no single statement index to expand at rewrite time;
+`rewrite_loop_stmts_multi` runs plain substitution over every statement
+instead (sound and sufficient here: each field mutation is already an
+independent, self-contained statement - no parallel temp-then-assign
+staging is needed the way whole-object reconstruction requires, since
+Julia's own normal sequential execution already gives the correct
+per-field update order)."""
+function classify_loop_mutable(header, loop_stmts, varname, typename, fields, mod::Module)
+    any(s -> s isa Expr && Meta.isexpr(s, :(=)) && length(s.args) == 2 && s.args[1] === varname, loop_stmts) &&
+        throw(AsrDecline("mutable accumulator reassigned as a whole - not supported"))
+
+    has_mutation = false
+    for s in loop_stmts
+        mut = is_field_mutation(s, varname, fields)
+        if mut !== nothing
+            has_mutation = true
+            check_only_field_reads(mut.valexpr, varname, fields, typename, mod)
+        else
+            check_only_field_reads(s, varname, fields, typename, mod)
+        end
+    end
+    has_mutation || throw(AsrDecline("no field mutation found in loop body"))
+    check_only_field_reads(header, varname, fields, typename, mod)
+    return (kind=:mutate,)
 end
 
 """Lightweight, non-throwing pre-check: does at least one leaf of the
@@ -710,12 +811,32 @@ than v1.6's original hard one-level cap; `cache` memoizes each
 top-level check (shared across the whole recursive walk, not reset per
 call) both for efficiency and to make a cyclic call chain (`f` calls
 `g` calls `f`) resolve to "unsafe" via its `:computing` sentinel rather
-than infinite-looping."""
+than infinite-looping.
+
+v1.9: a field-WRITE shape (`varname.f = expr`/`varname.f += expr`,
+matching `is_field_mutation`) is explicitly REJECTED here, not
+tolerated - `is_field_read`'s own shape check doesn't distinguish read
+from write context (`Expr(:., varname, QuoteNode(f))` looks identical
+either way), and this walker's callers all assume READ-ONLY safety
+(v1.6/v1.8's opaque-call passthrough rewrites by re-boxing a FRESH,
+throwaway copy and discarding it after the call - sound only if
+nothing was written to it; a mutating callee's effect would silently
+vanish). This was a real, latent soundness gap sitting dormant since
+v1.6 - unreachable only because mutable types were hard-rejected at
+`try_accumulator_stmt` before v1.9 - closed here as part of enabling
+mutable accumulators at all, not as a separate fix. Direct field
+mutation IS supported (v1.9), but only via `classify_loop_mutable`'s
+own explicit, separate detection of top-level mutation statements
+(`is_field_mutation`), which extracts and checks ONLY the right-hand
+side through this same walker - the left-hand-side write target is
+never passed to `check_only_field_reads` at all."""
 function check_only_field_reads(term, varname, fields, typename, mod::Module; depth::Int=0, cache::Dict=Dict())
     if is_field_read(term, varname, fields)
         return
     elseif term isa Symbol
         term === varname && throw(AsrDecline("bare accumulator reference outside a field read"))
+    elseif is_field_mutation(term, varname, fields) !== nothing
+        throw(AsrDecline("field mutation not permitted in a read-only context"))
     elseif Meta.isexpr(term, :call)
         callee = term.args[1]
         callargs = term.args[2:end]
@@ -739,6 +860,31 @@ function is_field_read(term, varname, fields)
     recv, fieldnode = term.args
     (recv === varname && fieldnode isa QuoteNode) || return false
     return fieldnode.value in fields
+end
+
+"""Standard Julia compound-assignment operator heads. `p.x += 1` does
+NOT desugar to `p.x = p.x + 1` at parse time (confirmed empirically) -
+it keeps its own `:+=` head, `Expr(:+=, Expr(:.,...), 1)` - so a
+field-mutation detector must check for all of these, not just `:(=)`,
+or it would silently miss the idiomatic compound-assignment form real
+code actually uses."""
+const COMPOUND_ASSIGN_HEADS = (:+=, :-=, :*=, :/=, :÷=, :\=, :^=, :%=,
+                                :&=, :|=, :⊻=, :<<=, :>>=, :>>>=)
+
+"""Returns `(field=f, valexpr=expr)` if `s` is a direct field-mutation
+statement on `varname` - `varname.f = expr` or a compound form
+(`varname.f += expr`, etc.) with `f ∈ fields` - else `nothing`. Used
+two ways: `classify_loop_mutable` calls this to POSITIVELY recognize a
+mutation site (v1.9); `check_only_field_reads` calls this to REJECT any
+such shape it encounters elsewhere (closing the soundness gap described
+in its own docstring)."""
+function is_field_mutation(s, varname, fields)
+    s isa Expr || return nothing
+    (Meta.isexpr(s, :(=)) || s.head in COMPOUND_ASSIGN_HEADS) && length(s.args) == 2 || return nothing
+    lhs, rhs = s.args
+    is_field_read(lhs, varname, fields) || return nothing
+    _, fieldnode = lhs.args
+    return (field=fieldnode.value, valexpr=rhs)
 end
 
 """Depth bound for the recursive interprocedural safety check (v1.8) -
@@ -987,11 +1133,17 @@ end
 """Walks loop_stmts once; at the position owned by some accumulator's
 own reconstruction, expands THAT accumulator's recon (direct/inline/
 branch), applying `subs` (every accumulator) for cross-accumulator field
-reads throughout; every other statement is just cross-substituted."""
+reads throughout; every other statement is just cross-substituted. A
+`:mutate` accumulator (v1.9) owns no single statement - `ap.recon.kind
+!== :mutate` short-circuits before `.idx` is ever accessed (a `:mutate`
+recon has no `idx` field at all), so every one of its own statements
+falls to the plain `subst_all` path instead, which is already correct
+and sufficient for direct field mutation (see `classify_loop_mutable`'s
+own docstring for why no special expansion is needed there)."""
 function rewrite_loop_stmts_multi(loop_stmts, accum_plans, subs)
     out = Any[]
     for (i, s) in enumerate(loop_stmts)
-        owner = findfirst(ap -> ap.recon.idx == i, accum_plans)
+        owner = findfirst(ap -> ap.recon.kind !== :mutate && ap.recon.idx == i, accum_plans)
         if owner !== nothing
             ap = accum_plans[owner]
             if ap.recon.kind === :branch

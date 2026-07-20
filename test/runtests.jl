@@ -14,6 +14,17 @@ struct Point
     y
 end
 
+# v1.9: a mutable struct accumulator, updated via direct field mutation
+# (`p.x = ...`/`p.x += ...`) rather than whole-object reconstruction -
+# cpython-asr's v1.4 analog, investigated and found to have near-zero
+# yield in the real corpus (corpus-study/README.md - idiomatic Julia
+# mutates through opaque method calls, not bare field assignment) but
+# implemented anyway as real, sound, general capability.
+mutable struct MVec
+    x
+    y
+end
+
 function plain_full(n)
     p = Point(0.0, 0.0)
     i = 0
@@ -458,6 +469,31 @@ end
     return p.x + p.y
 end
 
+# v1.9: direct field mutation on a mutable struct accumulator - both
+# plain `=` and compound (`+=`) forms, since they parse to different
+# AST shapes (`p.x += 1` does NOT desugar to `p.x = p.x + 1`).
+function plain_mutate(n)
+    p = MVec(0.0, 0.0)
+    i = 0
+    while i < n
+        p.x = p.x + 1.0
+        p.y += 2.0
+        i += 1
+    end
+    return p.x + p.y
+end
+
+@asr function asr_mutate(n)
+    p = MVec(0.0, 0.0)
+    i = 0
+    while i < n
+        p.x = p.x + 1.0
+        p.y += 2.0
+        i += 1
+    end
+    return p.x + p.y
+end
+
 @testset "AsrTransform positive cases" begin
     @test plain_full(1000) == asr_full(1000)
     @test plain_partial(500) == asr_partial(500)
@@ -474,6 +510,30 @@ end
     @test plain_paramed(1000) == asr_paramed(1000)
     @test plain_for(1000) == asr_for(1000)
     @test plain_branch_for(500) == asr_branch_for(500)
+    @test plain_mutate(1000) == asr_mutate(1000)
+
+    # Structural check for v1.9 mutation mode specifically: qualification
+    # fired iff the rewritten Expr no longer contains `p.x`/`p.y` field
+    # access at all (both mutation statements should scalarize to plain
+    # `p_x`/`p_y` assignments, not just tolerate-and-leave-unchanged).
+    mutate_ex = :(function f(n)
+        p = MVec(0.0, 0.0)
+        i = 0
+        while i < n
+            p.x = p.x + 1.0
+            p.y += 2.0
+            i += 1
+        end
+        return p.x + p.y
+    end)
+    new_mutate_ex = AsrTransform.rewrite_function(mutate_ex, @__MODULE__)
+    mutate_body_stmts = AsrTransform.strip_linenums(new_mutate_ex.args[2].args)
+    mutate_loop_stmt = only(filter(s -> s isa Expr && s.head == :while, mutate_body_stmts))
+    mutate_loop_body_str = string(mutate_loop_stmt.args[2])
+    @test !occursin("p.x", mutate_loop_body_str)
+    @test !occursin("p.y", mutate_loop_body_str)
+    @test occursin("p_x", mutate_loop_body_str)
+    @test occursin("p_y", mutate_loop_body_str)
 
     # Structural check: qualification fired iff the rewritten Expr no
     # longer contains a `Point(...)` reconstruction call inside the loop.
@@ -607,6 +667,11 @@ probe_level1(tag::Int, q::Point) = tag + probe_level2(q)
 cycle_b(q::Point) = q.x + cycle_a(1, q)
 cycle_a(tag::Int, q::Point) = tag + cycle_b(q)
 
+# v1.9 negative case: a callee that genuinely MUTATES its parameter's
+# field - the soundness-gap case check_only_field_reads must now reject
+# (rebox-and-discard would silently drop this mutation).
+mutate_helper!(q::MVec) = (q.x = q.x + 1.0)
+
 function decline_unchanged(ex, mod)
     new_ex = try
         AsrTransform.rewrite_function(ex, mod)
@@ -647,7 +712,13 @@ end
         @test decline_unchanged(ex, @__MODULE__)
     end
 
-    @testset "mutable struct accumulator" begin
+    @testset "mutable struct accumulator, whole-variable reassignment" begin
+        # v1.9: mutable types are no longer categorically rejected, but
+        # this is still not a mutation-mode candidate - `p = MPoint(...)`
+        # reassigns the WHOLE variable (not a field), which
+        # classify_loop_mutable explicitly declines (a different, more
+        # complex case: re-binding to a possibly-different object
+        # entirely, out of scope here).
         ex = :(function f(n)
             p = MPoint(0.0, 0.0)
             i = 0
@@ -669,6 +740,62 @@ end
             return p.x + p.y
         end
         @test run_mutable_decline(10) == 30.0
+    end
+
+    @testset "v1.9: mutable struct with no field mutation at all declines" begin
+        ex = :(function f(n)
+            p = MVec(0.0, 0.0)
+            i = 0
+            while i < n
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.9: field mutation nested inside an if declines" begin
+        # v1.9 scope: only TOP-LEVEL mutation statements in the loop
+        # body are recognized; one nested inside an `if` falls through
+        # to the generic check_only_field_reads safety net, which now
+        # explicitly rejects any field-write shape it encounters
+        # (closing the soundness gap - see check_only_field_reads's own
+        # docstring), so this correctly declines rather than being
+        # silently mishandled.
+        ex = :(function f(n)
+            p = MVec(0.0, 0.0)
+            i = 0
+            while i < n
+                if i > 0
+                    p.x = p.x + 1.0
+                end
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.9: mutation via an opaque call passthrough still declines" begin
+        # The soundness gap this session found and closed: a callee
+        # that mutates its parameter's field can no longer be verified
+        # "safe read-only" by verify_safe_passthrough_arg/
+        # check_method_param_safe, since v1.6/v1.8's rewrite re-boxes a
+        # FRESH, throwaway copy for a read-only passthrough and discards
+        # it after the call - sound only if nothing was written. v1.9
+        # does not support mutation-through-opaque-calls at all (only
+        # direct, top-level field mutation) - deliberately deferred, not
+        # silently unsound.
+        ex = :(function f(n)
+            p = MVec(0.0, 0.0)
+            i = 0
+            while i < n
+                mutate_helper!(p)
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
     end
 
     @testset "parametric AND mutable struct accumulator" begin
