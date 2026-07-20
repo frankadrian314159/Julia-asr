@@ -15,10 +15,17 @@ Grouped by which Julia-asr feature tier each one exercises:
 - **v1.2 (branch-shaped reconstruction)**: Bounce (3-way `if`/`elseif`/`else`), Clamp (2-way `if`/`else`), Phase (3-way on `i % 3`) - unlike BEAM-asr's clause-dispatch (free), a `while` loop has one body block, so this genuinely needed new tree-walking code, not just a benchmark port
 - **v1.3 (multi-accumulator)**: Kalman (two record types, asymmetric field counts, cross-coupled via intermediate bindings), Twobody (two accumulators of the *same* record type, each reading the other directly)
 
+A 15th benchmark, `Listenany`, is not part of this ported set - it's
+`Sockets.listenany`, the corpus study's first genuinely qualifying
+real-world file (v1.6, `corpus-study/README.md`), benchmarked by
+running the actual unmodified stdlib source both ways rather than a
+hand-written .fol port. See "A real-world benchmark" below.
+
 ## Running
 
 ```bash
-julia benchmarks/run_all.jl
+julia benchmarks/run_all.jl       # the 14 ported benchmarks
+julia benchmarks/run_listenany.jl # the real-world Sockets.listenany benchmark
 ```
 
 Correctness (baseline vs. `@asr`'d output, bit-identical) gates any
@@ -91,6 +98,52 @@ work ASR is designed to do, the transform can occasionally cost more than
 it saves for a sufficiently large, already-optimized function - a real,
 concrete illustration of "host-compiler-dependent payoff" going
 *negative*, not just *smaller*.
+
+## A real-world benchmark: Sockets.listenany, and a third distinct outcome
+
+Unlike the 14 ported benchmarks (hand-written .fol code, translated),
+`Listenany` runs `Sockets.listenany` itself - re-parsed straight from
+the installed Julia's own `Sockets.jl` and transformed by the real
+`AsrTransform.rewrite_function`, never hand-transcribed
+(`bench_listenany.jl`). To get a repeatable retry count (real port
+availability is otherwise nondeterministic), the benchmark pre-occupies
+5 consecutive ports and always requests the first one, forcing the
+retry loop to walk past all 5 before succeeding - 6 `InetAddr`
+constructions per call in the baseline (1 initial + 5 retries).
+
+```
+Correctness: OK (plain == asr, 200 calls)
+
+Benchmark      Base ms     ASR ms Speedup  Base constr ASR constr
+----------------------------------------------------------------------------
+Listenany       129.28     126.73   1.02x        1200x       1200x
+```
+
+**Construction count: 1200x baseline, 1200x ASR'd - zero elimination,
+not a bug.** `listenany`'s guard clause, `bind(sock, addr)`, needs a
+*real, boxed* `InetAddr` on every single iteration (v1.6's own
+qualifying shape - see `README.md`'s Status table), so the rewritten
+loop still constructs one fresh right at that call site each iteration
+(`bind(sock, InetAddr(addr_host, addr_port))`) rather than eliminating
+it - confirmed by actually counting (a separate instrumented variant
+with `InetAddr(...)` renamed to a counting wrapper throughout the
+rewritten AST), not assumed from reading the code. This is a genuinely
+different outcome from all 14 synthetic benchmarks, which eliminate
+100% of constructions: those never pass their accumulator to anything
+that needs a boxed value mid-loop, so there's nothing forcing a
+re-box until (if ever) the very end. `listenany` is the first case in
+this whole project where a real accumulator's own escape point sits
+*inside* the loop rather than only after it, and the result is exactly
+what the mechanism should do in that situation - stage the
+reconstruction as scalars everywhere it's cheap to, then re-box exactly
+where an opaque boundary genuinely requires a real object, no more and
+no less.
+
+**Timing: ~1.0x, consistent with the other 14** - real socket syscalls
+(socket creation, bind, close) dominate wall-clock time regardless of
+which version runs, the same "host-compiler-already-handles-it" story
+as the synthetic set, just for a different underlying reason here
+(syscall-bound, not JIT-eliminated-allocation).
 
 ## Caveats (v1-v1.3 scope)
 
