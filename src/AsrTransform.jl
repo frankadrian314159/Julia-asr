@@ -25,15 +25,29 @@ type-parameter inference resolve it identically either way). Found by
 the corpus study (`corpus-study/README.md`) to be the single
 highest-leverage exclusion in real code - `Sockets.listenany`'s
 `InetAddr{T<:IPAddr}` retry loop is the corpus's cleanest example,
-though it still declines for an unrelated, second reason: its loop
-body's first statement is an `if` with no terminal `else` (an
+though it still declined (at the time) for an unrelated, second reason:
+its loop body's first statement is an `if` with no terminal `else` (an
 early-return guard clause, not an attempted reconstruction of the
-accumulator at all), and `classify_loop` dispatches to
+accumulator at all), and `classify_loop` dispatched to
 `classify_branch_tree` for *any* top-level `if` unconditionally,
 without first checking whether its leaves reference the accumulator's
-own reconstruction shape - not fixed here, a distinct, separately
-scoped issue from parametric-struct support. See Julia-asr design
-notes for the full qualification/rewrite spec this module implements.
+own reconstruction shape. v1.5 fixes exactly this
+(`if_tree_attempts_reconstruction` - a non-throwing pre-check: only
+commit to `classify_branch_tree`'s own strict validation, mandatory
+terminal else included, when at least one leaf's last statement
+actually looks like `varname = ...(...)`; otherwise fall through to the
+same generic `check_only_field_reads` safety check any other ordinary
+statement gets). Verified against real code both ways: an unrelated
+guard clause that doesn't touch the accumulator no longer blocks a
+later genuine reconstruction, but one that passes the accumulator bare
+into an opaque call still correctly declines - `Sockets.listenany`
+itself does exactly this (`bind(sock, addr)`), so it still declines
+post-v1.5 too, now for that true reason ("bare accumulator reference
+outside a field read") rather than the previous false one. See
+`corpus-study/README.md` for the full account: this was a genuine,
+verified bug fix that nonetheless left the corpus's own qualifying
+count unchanged. See Julia-asr design notes for the full
+qualification/rewrite spec this module implements.
 
 No world-guard mechanism is needed (unlike FOL and cpython-asr): Julia
 raises a hard compile-time error on redefining a struct's field layout in
@@ -221,7 +235,19 @@ function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
                             int_names=plan.int_names, ctor_args=plan.ctor_args))
             continue
         end
-        if Meta.isexpr(s, :if)
+        # v1.5: only commit to classify_branch_tree's own strict
+        # validation (mandatory terminal else included) when at least
+        # one leaf of this if/elseif/else actually looks like it's
+        # trying to reconstruct `varname` - otherwise this is unrelated
+        # control flow that merely happens to appear in the loop body
+        # (an early-return guard clause, say), and unconditionally
+        # dispatching ANY top-level `if` here would decline the WHOLE
+        # loop on that unrelated statement's own shape before a genuine
+        # reconstruction elsewhere in the body is ever examined. Found
+        # by the corpus study (corpus-study/README.md): Sockets.jl's
+        # listenany has exactly this shape, an `if bind(...) ...; end`
+        # guard with no else, ahead of its own real reconstruction.
+        if Meta.isexpr(s, :if) && if_tree_attempts_reconstruction(s, varname)
             tree = classify_branch_tree(s, varname, typename, fields, mod)
             push!(recons, (idx=i, kind=:branch, tree=tree))
             continue
@@ -231,6 +257,44 @@ function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
     check_only_field_reads(cond, varname, fields)
     length(recons) == 1 || throw(AsrDecline("expected exactly one reconstruction assignment in loop body"))
     return recons[1]
+end
+
+"""Lightweight, non-throwing pre-check: does at least one leaf of the
+if/elseif/else tree's own last statement look like `varname =
+...(...)` - the same shape `try_direct_reconstruction`/
+`try_inline_call_shape` validate strictly? Not a validation itself
+(classify_branch_tree's own stricter checks, including the mandatory
+terminal else, still run afterward and can still correctly decline) -
+just decides whether `classify_loop` should attempt that stricter
+validation for THIS if-statement at all, rather than falling through to
+it unconditionally for every top-level `if` regardless of whether it
+has anything to do with the accumulator."""
+function if_tree_attempts_reconstruction(ifexpr, varname)
+    Meta.isexpr(ifexpr, :if) || return false
+    length(ifexpr.args) in (2, 3) || return false
+    leaf_last_stmt_assigns(ifexpr.args[2], varname) && return true
+    length(ifexpr.args) == 3 || return false
+    return else_part_attempts_reconstruction(ifexpr.args[3], varname)
+end
+
+function else_part_attempts_reconstruction(else_part, varname)
+    if Meta.isexpr(else_part, :elseif)
+        length(else_part.args) == 3 || return false
+        _, then_block, else_part2 = else_part.args
+        leaf_last_stmt_assigns(then_block, varname) && return true
+        return else_part_attempts_reconstruction(else_part2, varname)
+    elseif Meta.isexpr(else_part, :block)
+        return leaf_last_stmt_assigns(else_part, varname)
+    end
+    return false
+end
+
+function leaf_last_stmt_assigns(block, varname)
+    Meta.isexpr(block, :block) || return false
+    stmts = strip_linenums(block.args)
+    isempty(stmts) && return false
+    last_stmt = stmts[end]
+    return Meta.isexpr(last_stmt, :(=)) && length(last_stmt.args) == 2 && last_stmt.args[1] === varname
 end
 
 """Returns the reconstruction call's positional args if `s` is

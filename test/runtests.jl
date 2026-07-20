@@ -493,6 +493,11 @@ function collide_step(p)
     Point(x1, p.y)
 end
 
+# Mirrors Sockets.jl's `bind(sock, addr)` - an opaque call receiving
+# the accumulator bare, exactly the shape an unrelated loop-body guard
+# clause must still be caught using even after the v1.5 if-dispatch fix.
+guard_use_bare(p) = true
+
 function decline_unchanged(ex, mod)
     new_ex = try
         AsrTransform.rewrite_function(ex, mod)
@@ -810,6 +815,63 @@ end
                 i += 1
             end
             return p.x
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "unrelated if-statement (no else) does not block a later reconstruction" begin
+        # v1.5 fix: classify_loop no longer dispatches EVERY top-level
+        # `if` to classify_branch_tree unconditionally - an unrelated
+        # guard clause (no else, doesn't touch p at all) must not block
+        # the genuine reconstruction appearing later in the loop body.
+        # Mirrors Sockets.jl's listenany exactly (corpus-study/README.md).
+        @asr function guarded_recon_qualifies(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if i < 0
+                    error("unreachable guard clause")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        function guarded_recon_plain(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if i < 0
+                    error("unreachable guard clause")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        @test guarded_recon_plain(1000) == guarded_recon_qualifies(1000)
+    end
+
+    @testset "unrelated if-statement using the accumulator bare still declines" begin
+        # The other half of the same fix's own safety boundary: an
+        # unrelated guard clause that passes the accumulator BARE into
+        # an opaque call (exactly `Sockets.listenany`'s own
+        # `bind(sock, addr)`) still correctly declines - now for the
+        # true reason ("bare accumulator reference outside a field
+        # read"), not the previous false one ("requires a terminal
+        # else"), but a decline either way, confirmed directly against
+        # real code (corpus-study/README.md).
+        ex = :(function f(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if guard_use_bare(p)
+                    error("nope")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
         end)
         @test decline_unchanged(ex, @__MODULE__)
     end
