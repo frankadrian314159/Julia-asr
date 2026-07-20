@@ -493,10 +493,52 @@ function collide_step(p)
     Point(x1, p.y)
 end
 
-# Mirrors Sockets.jl's `bind(sock, addr)` - an opaque call receiving
-# the accumulator bare, exactly the shape an unrelated loop-body guard
-# clause must still be caught using even after the v1.5 if-dispatch fix.
-guard_use_bare(p) = true
+# Mirrors Sockets.jl's `bind(sock, addr)` shape (an opaque call
+# receiving the accumulator bare) but, unlike `bind`, genuinely RETAINS
+# its argument rather than just reading fields from it - v1.6's
+# interprocedural check must still decline this even though it can
+# resolve the callee and its source, because the callee's own body uses
+# its parameter as more than a field read. A helper that simply
+# discarded `p` (e.g. `f(p) = true`) would be correctly PROVEN safe by
+# v1.6 and is no longer a valid negative case for this shape.
+const _GUARD_STORE = Ref{Any}(nothing)
+function guard_use_bare(p)
+    _GUARD_STORE[] = p
+    return true
+end
+
+# v1.6: an opaque call receiving the accumulator as a NON-sole argument
+# (position 2 of 2), long-form definition, whose body reads only fields
+# of its matching parameter - the shape try_inline_helper never covered
+# (it requires the accumulator be the SOLE argument).
+function pt_probe(tag::Int, q::Point)
+    tag + q.x + q.y
+end
+
+# v1.6: the same shape but short-form (`f(...) = expr`), directly
+# mirroring Sockets.jl's own
+# `bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host, addr.port)`
+# one-liner, which parses to a different top-level Expr shape than a
+# long-form `function ... end` def.
+pt_probe_short(tag::Int, q::Point) = tag + q.x + q.y
+
+# v1.6 negative case: two methods of the same name/arity BOTH accept
+# Point at the accumulator's position (differing only in the OTHER
+# argument's type) - verify_safe_passthrough_arg filters candidate
+# methods by arity and by type at the accumulator's own position only,
+# not by every other argument, so this must resolve to two ambiguous
+# candidates and decline rather than silently picking one.
+ambiguous_probe(tag::Int, q::Point) = tag + q.x + q.y
+ambiguous_probe(tag::String, q::Point) = length(tag) + q.x + q.y
+
+# v1.6 regression case: a PARAMETRIC method (`where T`) has a UnionAll
+# `Method.sig`, not a plain DataType with a `.parameters` field -
+# verify_safe_passthrough_arg must unwrap it (same discipline as v1.4's
+# struct-type handling) rather than crash. Found by the corpus study:
+# TOML.jl's `point_to_line` calls a parametric IO-printing method and
+# raised an uncaught `UnionAll has no field parameters` error before
+# this fix.
+parametric_probe(tag::Vector{T}, q::Point) where {T} = length(tag) + q.x + q.y
 
 function decline_unchanged(ex, mod)
     new_ex = try
@@ -874,6 +916,131 @@ end
             return p.x + p.y
         end)
         @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.6: opaque call passthrough, non-sole argument, long-form helper" begin
+        # Mirrors Sockets.jl's listenany/bind shape directly: the
+        # accumulator is passed bare as one of TWO arguments to
+        # `pt_probe`, not the sole argument `try_inline_helper` requires.
+        # `pt_probe`'s own body only reads `q.x`/`q.y`, so v1.6's
+        # `verify_safe_passthrough_arg` must resolve the single
+        # applicable method (dispatch-filtered by type at that
+        # position) and prove the guard safe, letting the later genuine
+        # reconstruction still qualify.
+        @asr function probe_guard_qualifies(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if pt_probe(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        function probe_guard_plain(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if pt_probe(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        @test probe_guard_plain(1000) == probe_guard_qualifies(1000)
+    end
+
+    @testset "v1.6: opaque call passthrough, short-form helper" begin
+        # Same shape, but the resolved helper is a short-form def
+        # (`f(...) = expr`) - the exact AST shape of Sockets.jl's own
+        # `bind(sock, addr) = bind(sock, addr.host, addr.port)`, which
+        # find_function_def_by_arity must locate just as reliably as a
+        # long-form def.
+        @asr function probe_guard_short_qualifies(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if pt_probe_short(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        function probe_guard_short_plain(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if pt_probe_short(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        @test probe_guard_short_plain(1000) == probe_guard_short_qualifies(1000)
+    end
+
+    @testset "v1.6: ambiguous dispatch at the accumulator's position declines" begin
+        # Two methods of `ambiguous_probe` share the same arity and BOTH
+        # accept Point at position 2 (differing only in the OTHER
+        # argument's type, which verify_safe_passthrough_arg does not
+        # filter on) - this must resolve to two candidate methods and
+        # decline rather than silently picking one, since which method
+        # actually runs depends on a call-site argument type this
+        # transform never inspects.
+        ex = :(function f(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if ambiguous_probe(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.6: opaque call passthrough to a parametric method does not crash" begin
+        # The regression itself: `parametric_probe` is called with the
+        # accumulator at position 2, and the ONLY applicable method is
+        # parametric (`where T`) - resolving it must not raise past
+        # AsrDecline, and since its body only reads q.x/q.y, it should
+        # actually qualify.
+        @asr function parametric_guard_qualifies(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if parametric_probe(Int[], p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        function parametric_guard_plain(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if parametric_probe(Int[], p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        @test parametric_guard_plain(1000) == parametric_guard_qualifies(1000)
     end
 
     @testset "multi: cross-accumulator scalar name collision" begin

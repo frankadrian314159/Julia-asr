@@ -373,7 +373,7 @@ Total loop sites (functions with >=1 while/for): 1809
 Single-top-level-while functions: 254
 Loop-site shape breakdown: Dict(:single_while => 254, :mixed => 66, :multi_while => 20, :has_for => 1469)
 Record-shaped candidate positions: 15
-Gate-faithful qualification: qualified=0 declined=15 error=0
+Gate-faithful qualification: qualified=1 declined=14 error=0
 
 === Record-shaped candidate detail ===
 file.jl :: pwd var=sz type=RefValue kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
@@ -387,7 +387,7 @@ toml_parser.jl :: parse_inline_table var=dict type=TOMLDict kind=record_other ->
 JuliaSyntax\src\parser.jl :: parse_array var=array_order type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 JuliaSyntax\test\test_utils.jl :: parse_sexpr var=st type=ParseStream kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 strings\unicode.jl :: iterate var=state type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
-Sockets\src\Sockets.jl :: listenany var=addr type=InetAddr kind=record_strong -> declined (no candidate accumulator qualified)
+Sockets\src\Sockets.jl :: listenany var=addr type=InetAddr kind=record_strong -> qualified ()
 REPL\src\LineEdit.jl :: normalize_key var=buf type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 REPL\src\REPL.jl :: run_frontend var=d type=REPLDisplay kind=record_other -> declined (no candidate accumulator qualified)
 REPL\src\REPL.jl :: run_frontend var=d type=REPLDisplay kind=record_other -> declined (no candidate accumulator qualified)

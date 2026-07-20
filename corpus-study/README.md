@@ -52,6 +52,47 @@ categorization table further down is kept as originally written (what
 motivated the v1.4 fix) with a "Status" column noting what's fixed vs.
 still open as of v1.5.
 
+**Update (v1.6)**: the third wall was investigated rather than accepted
+as final - `bind`'s own `InetAddr` method turns out to be
+`bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host,
+addr.port)`, a one-line destructuring pass-through that only ever reads
+`addr`'s fields, so passing the accumulator bare into it is genuinely
+safe, just not a shape v1.1's sole-argument-only inlining could ever
+recognize. `verify_safe_passthrough_arg` generalizes it: resolve the
+callee via multiple dispatch to the single method whose signature
+accepts the accumulator's own type at the matching argument position
+(not "exactly one method total", the way v1.1's helper inlining works -
+`bind` genuinely has several methods across Sockets.jl, PipeServer.jl,
+and Base's own channels.jl), then confirm that method's matching
+parameter is used only via field reads, one level deep. Getting this to
+actually work against real code surfaced two more real,
+previously-latent v1.1 bugs, both invisible until tested against actual
+stdlib source rather than hand-written test helpers: `Method.file`
+reports the *build machine's* own path for anything compiled into a
+precompiled sysimage (confirmed for `Sockets.bind`: it pointed at
+`C:\workdir\usr\share\julia\...`, a path that doesn't exist on this
+machine, even though `Base.find_source_file` - which `functionloc`
+itself relies on - didn't fix it either; recovered by locating the
+path's own `stdlib/vX.Y/...` suffix and rejoining it onto `Sys.STDLIB`,
+which *does* resolve correctly); and a real source file is typically
+its own `module X ... end` (`Sockets.jl` itself is `module Sockets
+... end`), which the original flat top-level-only helper-source scan
+never recursed into at all - so v1.1's interprocedural inlining had
+silently found nothing for any module-wrapped helper source since it
+first shipped, just never exercised against one until now. Both fixes
+apply to v1.1 as much as v1.6. A third bug - `m.sig` is a `UnionAll`,
+not a plain `DataType`, for a parametric method (`f(x::Vector{T}) where
+T`), and `.parameters` doesn't exist on a `UnionAll` - was caught by
+this exact corpus study re-run itself: `toml_parser.jl`'s
+`point_to_line` calls a parametric IO-printing method and turned a
+clean decline into an uncaught `error`, fixed by unwrapping first (same
+discipline as v1.4's own struct-type handling). **With all three walls
+addressed, `Sockets.listenany` now qualifies** - confirmed both via the
+gate-faithful oracle and by actually running the rewritten function
+(including its retry-on-taken-port path, which exercises more than one
+loop iteration) side by side with the baseline. **The corpus study now
+shows 1 of 15 candidates qualifying.**
+
 **A real methodological difference from the sibling studies, not just a
 smaller number**: Erlang/OTP and the Python package ecosystem are both
 far too large to scan exhaustively, so BEAM-asr and cpython-asr each
@@ -153,7 +194,7 @@ Total LOC: 272,688
 Total loop sites (functions with >=1 while/for): 1,809
 Loop-site shape breakdown: single_while=254  has_for=1,469  mixed=66  multi_while=20
 Record-shaped candidate positions: 15
-Gate-faithful qualification: qualified=0  declined=15  error=0
+Gate-faithful qualification: qualified=1  declined=14  error=0
 ```
 
 **Headline finding #1, before the record-shape question is even
@@ -172,8 +213,9 @@ qualification question matters.
 **Headline finding #2: even restricted to the 254 in-scope
 `single_while` functions, a syntactically record-accumulator-shaped
 pre-loop init occurs in only 15 positions (5.9% of in-scope functions,
-0.83% of all loop sites) - and all 15 decline, every one for a reason
-already documented as a deliberate v1-v1.3 exclusion, not a new gap.**
+0.83% of all loop sites) - 14 of which decline, every one for a reason
+already documented as a deliberate v1-v1.3 exclusion, not a new gap,
+and one of which (`Sockets.listenany`) now qualifies as of v1.6.**
 
 ### Why all 15 decline: two already-documented walls account for 13
 
@@ -185,22 +227,25 @@ check in:
 
 | Category | Count | Sites | Reason | Status |
 |---|---|---|---|---|
-| **Parametric struct** | 10 | `RefValue`×3 (`pwd`, `tempdir`, `homedir`), `IOContext`×2 (`point_to_line`), `Ref`×2 (`parse_array`, `unicode.jl::iterate`), `InetAddr`×1 (`Sockets.listenany`), `REPLDisplay`×2 (`REPL.run_frontend`) | `resolve_type` returned a `UnionAll` (e.g. `Base.RefValue{T}`, `Sockets.InetAddr{T<:IPAddr}`), not a `DataType` - `T isa DataType` failed by design (a deliberate v1-v1.3 exclusion). | **Fixed in v1.4** - `try_accumulator_stmt` now unwraps the `UnionAll` first. `RefValue`/`IOContext`/`Ref`/`REPLDisplay` are *also* mutable, so they still correctly decline on that separate wall; `InetAddr` alone clears type resolution, confirmed directly. It then hit the `if`-dispatch wall (also now fixed in v1.5, confirmed directly) - but still declines regardless, for a *third*, distinct reason: `addr` is passed bare into `bind(sock, addr)`, an opaque call the transform can't safely reason about. Three independent walls on one function, each real, each verified, each requiring its own fix. |
+| **Parametric struct** | 10 | `RefValue`×3 (`pwd`, `tempdir`, `homedir`), `IOContext`×2 (`point_to_line`), `Ref`×2 (`parse_array`, `unicode.jl::iterate`), `InetAddr`×1 (`Sockets.listenany`), `REPLDisplay`×2 (`REPL.run_frontend`) | `resolve_type` returned a `UnionAll` (e.g. `Base.RefValue{T}`, `Sockets.InetAddr{T<:IPAddr}`), not a `DataType` - `T isa DataType` failed by design (a deliberate v1-v1.3 exclusion). | **Fixed in v1.4** - `try_accumulator_stmt` now unwraps the `UnionAll` first. `RefValue`/`IOContext`/`Ref`/`REPLDisplay` are *also* mutable, so they still correctly decline on that separate wall; `InetAddr` alone clears type resolution, confirmed directly. It then hit the `if`-dispatch wall (fixed in v1.5) and, after that, a third wall - `addr` passed bare into `bind(sock, addr)` - **fixed in v1.6** (`verify_safe_passthrough_arg`). **`Sockets.listenany` now qualifies**, the only one of these 10 to clear all three walls (the other 9 are also mutable, a separate, still-unimplemented wall). |
 | **Mutable struct** | 3 | `IOBuffer`×1 (`REPL.normalize_key`), `TOMLDict`×1 (`= Dict{String,Any}`, `parse_inline_table`), `ParseStream`×1 (`mutable struct ParseStream`, JuliaSyntax) | `ismutabletype(T)` is true - Julia-asr has no mutation mode (`cpython-asr`'s v1.4 analog, unimplemented here). `TOMLDict`/`ParseStream` initially reported "doesn't resolve" because the corpus scan checks types in `Base` directly, not their own vendored submodule (`Base.TOML`, `Base.JuliaSyntax`) - confirmed by direct definition lookup (`TOMLDict = Dict{String,Any}`; `mutable struct ParseStream`) that both land on this same wall once resolved correctly, not a third category. | Unaffected by v1.4 - still correctly declines; unimplemented mutation mode is a separate, structurally bigger feature (see below). |
 | **Pass-1 syntactic false positive: method type parameter** | 1 | `T` (`intfuncs.jl::binomial`, `rr = T(2)`) | `T` here is a `where T` method type parameter, not a module-level type binding - `T(2)` is syntactically identical to a type-constructor call, but `Core.eval(Base, :T)` is an `UndefVarError`. A Pass-1 imprecision (no signature-tracking), not a transform finding - mirrors BEAM-asr's own "record_weak is deliberately loose" caveat. | Unaffected by v1.4 - not a real transform limitation. |
 | **Genuine non-parametric, non-mutable struct - declines for an unrelated loop-shape reason** | 1 | `SummarySize` (`summarysize.jl::summarysize`) | The one candidate that clears type resolution entirely. `ss = SummarySize(IdDict(), Any[], Int[], exclude, chargeall)` is never reassigned inside the loop - only its own *mutable-array fields* (`ss.frontier_x`, `ss.frontier_i`) are grown/shrunk via `push!`/`pop!` (a DFS/BFS worklist), the same "stateful helper object mutated via its own container fields" idiom found repeatedly among the `record_other`-then-excluded hits below. Declines with `"no candidate accumulator qualified"` - `classify_loop` never finds a reconstruction assignment for `ss` at all. | Unaffected by v1.4 - genuinely not an ASR accumulator loop, no fix applies. |
 
-**13 of 15 (87%) hit one of Julia-asr's own already-documented v1-v1.3
-exclusions** (parametric or mutable structs) - this corpus doesn't
-surface a new gap so much as it *confirms*, against real code, that
-those two documented boundaries are the actual reason a real
-record-shaped loop declines when one occurs at all. `Sockets.listenany`
-was the cleanest example: a genuine port-retry loop,
+**Of the 14 that still decline, 12 (86%) hit the mutable-struct wall**
+(the 9 remaining parametric-and-mutable hits, plus the 3 directly
+mutable ones) - Julia-asr's one still-unimplemented v1-v1.3 exclusion;
+this corpus doesn't surface a new gap so much as it *confirms*, against
+real code, that mutable-struct support (`cpython-asr`'s v1.4 analog) is
+the single highest-leverage remaining extension. `Sockets.listenany`
+was the cleanest example of the other kind: a genuine port-retry loop,
 `addr = InetAddr(addr.host, addr.port + UInt16(1))` reconstructed once
-per attempt - textbook ASR shape. Parametric-struct support (v1.4,
-below) has since removed that specific block, but `listenany` still
-declines, for the unrelated `classify_loop` if-dispatch reason
-described in "What would unlock the most real code."
+per attempt - textbook ASR shape, immutable, no mutation-mode dependency
+at all. It took three separate fixes (v1.4 parametric structs, v1.5
+if-dispatch, v1.6 opaque-call passthrough) to actually clear it, and it
+now qualifies - the corpus study's first genuinely qualifying real-world
+file, and direct confirmation that the mechanism really does transfer to
+real code, not just synthetic benchmarks.
 
 ### The dominant pattern behind the *other* false positives: mutable helper objects, not reconstructed records
 
@@ -240,8 +285,8 @@ independent of whether `@asr` could handle it.
   primitives) - a broader package corpus, especially domain code
   translated more directly from a functional/immutable style (physics
   simulations, parsers, ASTs), might show a different balance. Treat
-  the 0.83%-shaped / 0%-qualifying numbers as this corpus's own honest
-  data point, not a claim about "Julia code in general."
+  the 0.83%-shaped / 1-of-15-qualifying numbers as this corpus's own
+  honest data point, not a claim about "Julia code in general."
 - **15 hits is a small enough number that this study reads every one**
   (unlike BEAM-asr/cpython-asr's own sampling of a `record_weak`
   subset) - there's no "lower bound, not measured" caveat needed here.
@@ -252,59 +297,88 @@ independent of whether `@asr` could handle it.
   transform during Pass 2 exactly as they'd run in production - a
   candidate declining here is a genuine decline under the current
   shipped rules, not an artifact of a simplified study-only checker.
-- **0% qualifying should not be read as "ASR is useless for real Julia
-  code"** - `benchmarks/README.md` demonstrates the mechanism itself
-  works correctly end-to-end (14/14 synthetic benchmarks correct,
-  speedup near 1.0x for the reason above, not because the transform
-  failed). This study's finding is about *incidence*, not
+- **1-of-15 qualifying should not be read as "ASR barely applies to
+  real Julia code"** - `benchmarks/README.md` demonstrates the
+  mechanism itself works correctly end-to-end (14/14 synthetic
+  benchmarks correct, speedup near 1.0x for the reason above, not
+  because the transform failed), and `Sockets.listenany` demonstrates
+  it working correctly on real, unmodified stdlib source, retry loop
+  and all. This study's finding is still mostly about *incidence*, not
   *correctness*: real Julia standard-library code needing loop-carried
-  state overwhelmingly reaches for parametric types, mutable objects,
-  or `for` loops - shapes `@asr` v1-v1.3 was never targeting - rather
-  than the specific immutable-record-rebuilt-via-`while`  pattern the
-  transform recognizes.
+  state overwhelmingly reaches for mutable objects or `for` loops -
+  shapes `@asr` doesn't target at all - rather than the specific
+  immutable-record-rebuilt-via-`while` pattern the transform
+  recognizes; but where that shape genuinely occurs, v1.4-v1.6 show the
+  transform can be pushed, with real (not speculative) fixes, all the
+  way to actually handling it.
 
-## Two real, verified fixes - zero net new qualifications, and why that's still a good outcome
+## Three real, verified fixes - one net new qualification, and the trail that got there
 
-**Both parametric-struct support (v1.4) and the `classify_loop`
-if-dispatch fix (v1.5) were implemented and independently verified**
-against real code, each closing a genuine, previously-undetected gap
-(see `README.md`'s Status table). Re-running this exact study after
-both still shows **0 of 15 qualifying**, because `Sockets.listenany`
-- the one candidate either fix could plausibly have unlocked -
+**Parametric-struct support (v1.4) and the `classify_loop` if-dispatch
+fix (v1.5) were each implemented and independently verified** against
+real code, each closing a genuine, previously-undetected gap (see
+`README.md`'s Status table) - yet re-running this exact study after
+both still showed **0 of 15 qualifying**, because `Sockets.listenany`
 turned out to have not one blocker but three, stacked in the same
 function: the parametric type (v1.4), the if-dispatch issue (v1.5),
-and now a third, genuinely different one neither fix touches - `addr`
-is passed *bare* into `bind(sock, addr)`, an opaque call the transform
-has no way to verify is safe (does `bind` retain or alias the
-reference it's given?). This mirrors the exact shape of finding from
-the BEAM-asr/CGO project's own iterative corpus-study-then-fix cycle:
-a fix can be fully correct, independently verified, and still not move
-a headline number, because real code routinely stacks more than one
-qualification-blocking idiom in the very same function. Both v1.4 and
-v1.5 are real progress - confirmed by dedicated positive/negative tests
-proving each mechanism works correctly in isolation (`test/runtests.jl`)
-- even though *this specific corpus's* own candidates didn't happen to
-have only-one-blocker-each.
+and a third - `addr` passed *bare* into `bind(sock, addr)` - that
+neither fix touched. This mirrored the exact shape of finding from the
+BEAM-asr/CGO project's own iterative corpus-study-then-fix cycle: a fix
+can be fully correct, independently verified, and still not move a
+headline number, because real code routinely stacks more than one
+qualification-blocking idiom in the very same function.
 
-**The bare-accumulator-into-an-opaque-call shape is now the study's
-own highest-leverage remaining target**, and it's a materially harder
-one than the previous two: unlike `try_inline_helper`'s existing
-one-level inlining (which only ever accepts a helper called with the
-accumulator as its *sole* argument, so its own body can be fully
-re-validated against the same field-read-only rules), `bind(sock, addr)`
-passes the accumulator as *one of several* arguments to a function
-whose body isn't even necessarily Julia source the transform could
-re-parse (native/ccall-heavy code, in this case) - genuinely requiring
-either real interprocedural purity analysis or accepting a soundness
-risk, not a shape-recognition loosening like v1.4/v1.5 were. Not
-attempted in this session.
+**Rather than stopping there, the third blocker was investigated
+directly**: is passing `addr` bare into `bind` actually unsafe, or just
+unrecognized? Reading `bind`'s own `InetAddr` method answered it -
+`bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host,
+addr.port)` is a one-line destructuring pass-through that only ever
+reads `addr`'s fields, so it's genuinely safe, just a shape v1.1's
+sole-argument-only interprocedural inlining could never recognize.
+**v1.6 (`verify_safe_passthrough_arg`) generalizes it**: resolve the
+callee via multiple dispatch to the single method whose signature
+accepts the accumulator's own type at the matching argument position
+(not "exactly one method total" - `bind` has several, across three
+different files), then confirm that method's matching parameter is used
+only via field reads, one level deep, same discipline as v1.1's
+existing inlining.
+
+Actually making this work against real code surfaced two more real,
+previously-latent **v1.1** bugs (not v1.6-only), both invisible until
+tested against real stdlib source rather than hand-written test
+helpers: `Method.file` reports the *build machine's* own path for
+anything compiled into a precompiled sysimage - `C:\workdir\usr\share\...`
+for `Sockets.bind` on this machine, a path that doesn't exist here, and
+`Base.find_source_file` (which `functionloc` itself uses) didn't fix it
+either; recovered by locating the path's own `stdlib/vX.Y/...` suffix
+and rejoining it onto `Sys.STDLIB`, which does resolve correctly. And a
+real source file is typically its own `module X ... end` - `Sockets.jl`
+is `module Sockets ... end` - which the original flat, top-level-only
+helper-source scan never recursed into at all, meaning v1.1's
+interprocedural inlining had silently found nothing for any
+module-wrapped helper since it first shipped, never exercised against
+one until now. A third bug, caught by this exact corpus re-run: `m.sig`
+is a `UnionAll`, not a plain `DataType`, for a parametric method
+(`f(x::Vector{T}) where T`) - `toml_parser.jl`'s `point_to_line` calls
+one and turned a clean decline into an uncaught `error`, fixed by
+unwrapping first (same discipline as v1.4's own struct-type handling).
+
+**With all three walls addressed, `Sockets.listenany` now qualifies** -
+confirmed via the gate-faithful oracle, dedicated positive/negative
+tests (`test/runtests.jl`), and by actually running the rewritten
+function (including its retry-on-taken-port path, exercising more than
+one loop iteration) side by side with the baseline. This is the
+corpus's first genuinely qualifying real-world file, and direct,
+end-to-end confirmation - not just synthetic-benchmark confirmation -
+that the ASR mechanism transfers to real Julia code when its target
+shape genuinely occurs.
 
 Mutable-struct support (Julia-asr's own analog of `cpython-asr`'s v1.4
-mutation mode) remains the other real, structurally bigger extension (3
-of 15 hits here): unlike reconstruction, which only ever needs to track
-the *current* scalar values, in-place mutation requires escape analysis
-(does the mutated struct alias anything the transform can't see?) that
-this corpus's own hits (`IOBuffer`, `TOMLDict`, `ParseStream`) don't
-obviously simplify, since none of them are single-owner, non-escaping
-mutation in the way a freshly-constructed local accumulator naturally
-is.
+mutation mode) remains the other real, structurally bigger extension
+(3 of the 14 still-declining hits here): unlike reconstruction, which
+only ever needs to track the *current* scalar values, in-place mutation
+requires escape analysis (does the mutated struct alias anything the
+transform can't see?) that this corpus's own hits (`IOBuffer`,
+`TOMLDict`, `ParseStream`) don't obviously simplify, since none of them
+are single-owner, non-escaping mutation in the way a freshly-constructed
+local accumulator naturally is. Not attempted in this session.

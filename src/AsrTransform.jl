@@ -43,11 +43,39 @@ later genuine reconstruction, but one that passes the accumulator bare
 into an opaque call still correctly declines - `Sockets.listenany`
 itself does exactly this (`bind(sock, addr)`), so it still declines
 post-v1.5 too, now for that true reason ("bare accumulator reference
-outside a field read") rather than the previous false one. See
-`corpus-study/README.md` for the full account: this was a genuine,
-verified bug fix that nonetheless left the corpus's own qualifying
-count unchanged. See Julia-asr design notes for the full
-qualification/rewrite spec this module implements.
+outside a field read") rather than the previous false one. v1.6 closes
+this third and final gap (`verify_safe_passthrough_arg`): `bind`'s own
+`InetAddr` method - `bind(sock::TCPServer, addr::InetAddr) =
+bind(sock, addr.host, addr.port)` - is itself a one-line destructuring
+pass-through that only ever reads `addr`'s fields, so passing the
+accumulator bare into it is genuinely safe, just not something
+`try_inline_helper`'s `helper(varname)`-shaped SOLE-argument inlining
+(v1.1) could recognize. `verify_safe_passthrough_arg` generalizes this:
+resolves the callee via multiple dispatch to the single method whose
+signature accepts the accumulator's own declared type at the matching
+argument position (not `length(methods(f)) == 1`, since a stdlib
+function like `bind` genuinely has many methods), recovers that
+method's source (long- or short-form), and confirms its own matching
+parameter is used only via field reads throughout the entire method
+body - one level deep, no second level of pass-through allowed, same
+discipline as v1.1's own interprocedural inlining. The rewrite phase
+(`subst_field_reads`) mirrors this: a bare accumulator surviving as a
+call argument this far can only be a verified-safe pass-through (by
+construction - anything else would have declined at qualification), so
+it's re-boxed in place (`rebox_call`) rather than left dangling.
+Finding and fixing this surfaced two more, genuinely pre-existing bugs,
+both invisible until tested against real stdlib source rather than
+hand-written test helpers: `Method.file` reports the BUILD machine's
+own path for anything compiled into a precompiled sysimage, not this
+install's real location (`resolve_source_file` - also fixes v1.1's own
+identical, previously-latent bug); and a real source file is typically
+its own `module X ... end`, which the original flat top-level-only
+`find_function_def` (v1.1) never recursed into at all
+(`find_all_function_defs!` - likewise fixes v1.1, not just v1.6). With
+all three gaps closed, `Sockets.listenany` is the corpus study's first
+genuinely qualifying real-world file (`corpus-study/README.md`).
+See Julia-asr design notes for the full qualification/rewrite spec
+this module implements.
 
 No world-guard mechanism is needed (unlike FOL and cpython-asr): Julia
 raises a hard compile-time error on redefining a struct's field layout in
@@ -100,7 +128,7 @@ function rewrite_function(funcdef, mod::Module)
 
     accum_plans = find_and_classify_accumulators(pre_stmts, cond, loop_stmts, post_stmts, mod)
     check_collisions_multi(pre_stmts, cond, loop_stmts, post_stmts, accum_plans)
-    subs = [(ap.varname, ap.scalar_names) for ap in accum_plans]
+    subs = [(ap.varname, ap.scalar_names, ap.typename, ap.fields) for ap in accum_plans]
 
     new_pre = rewrite_pre_multi(pre_stmts, accum_plans)
     new_cond = subst_all(cond, subs)
@@ -134,7 +162,7 @@ function find_and_classify_accumulators(pre_stmts, cond, loop_stmts, post_stmts,
     for (varname, typename, fields) in candidates
         plan = try
             recon = classify_loop(cond, loop_stmts, varname, typename, fields, mod)
-            classify_post(post_stmts, varname, fields)
+            classify_post(post_stmts, varname, fields, typename, mod)
             scalar_names = Dict(f => scalar_name(varname, f) for f in fields)
             tmp_names = Dict(f => tmp_name(varname, f) for f in fields)
             int_names = Set{Symbol}()
@@ -223,7 +251,7 @@ see `classify_branch_tree`)."""
 function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
     recons = Any[]
     for (i, s) in enumerate(loop_stmts)
-        direct = try_direct_reconstruction(s, varname, typename, fields)
+        direct = try_direct_reconstruction(s, varname, typename, fields, mod)
         if direct !== nothing
             push!(recons, (idx=i, kind=:direct, ctor_args=direct))
             continue
@@ -252,9 +280,9 @@ function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
             push!(recons, (idx=i, kind=:branch, tree=tree))
             continue
         end
-        check_only_field_reads(s, varname, fields)
+        check_only_field_reads(s, varname, fields, typename, mod)
     end
-    check_only_field_reads(cond, varname, fields)
+    check_only_field_reads(cond, varname, fields, typename, mod)
     length(recons) == 1 || throw(AsrDecline("expected exactly one reconstruction assignment in loop body"))
     return recons[1]
 end
@@ -302,7 +330,7 @@ end
 `nothing`. Field-expressions may reference `varname` only via field
 reads - checked directly here since this statement is excluded from
 the caller's generic "every other statement" pass."""
-function try_direct_reconstruction(s, varname, typename, fields)
+function try_direct_reconstruction(s, varname, typename, fields, mod::Module)
     (Meta.isexpr(s, :(=)) && length(s.args) == 2) || return nothing
     lhs, rhs = s.args
     (lhs === varname && Meta.isexpr(rhs, :call)) || return nothing
@@ -312,7 +340,7 @@ function try_direct_reconstruction(s, varname, typename, fields)
     any(a -> Meta.isexpr(a, :kw) || Meta.isexpr(a, :...) || Meta.isexpr(a, :parameters), ctor_args) && return nothing
     length(ctor_args) == length(fields) || return nothing
     for a in ctor_args
-        check_only_field_reads(a, varname, fields)
+        check_only_field_reads(a, varname, fields, typename, mod)
     end
     return ctor_args
 end
@@ -347,7 +375,7 @@ function classify_branch_tree(ifexpr, varname, typename, fields, mod::Module)
     length(ifexpr.args) in (2, 3) || throw(AsrDecline("malformed if expression"))
     length(ifexpr.args) == 3 || throw(AsrDecline("branch-shaped reconstruction requires a terminal else"))
     cond, then_block, else_part = ifexpr.args
-    check_only_field_reads(cond, varname, fields)
+    check_only_field_reads(cond, varname, fields, typename, mod)
     Meta.isexpr(then_block, :block) || throw(AsrDecline("if-branch body is not a block"))
     then_leaf = classify_leaf_block(strip_linenums(then_block.args), varname, typename, fields, mod)
     else_leaf = classify_else_part(else_part, varname, typename, fields, mod)
@@ -362,7 +390,7 @@ function classify_else_part(else_part, varname, typename, fields, mod::Module)
         cond_stmts = strip_linenums(cond_block.args)
         length(cond_stmts) == 1 || throw(AsrDecline("malformed elseif condition"))
         cond = cond_stmts[1]
-        check_only_field_reads(cond, varname, fields)
+        check_only_field_reads(cond, varname, fields, typename, mod)
         Meta.isexpr(then_block, :block) || throw(AsrDecline("elseif body is not a block"))
         then_leaf = classify_leaf_block(strip_linenums(then_block.args), varname, typename, fields, mod)
         else_leaf = classify_else_part(else_part2, varname, typename, fields, mod)
@@ -382,7 +410,7 @@ function classify_leaf_block(stmts, varname, typename, fields, mod::Module)
     isempty(stmts) && throw(AsrDecline("branch leaf body is empty"))
     last_stmt = stmts[end]
     prefix = stmts[1:end-1]
-    direct = try_direct_reconstruction(last_stmt, varname, typename, fields)
+    direct = try_direct_reconstruction(last_stmt, varname, typename, fields, mod)
     leaf = if direct !== nothing
         (kind=:direct, ctor_args=direct)
     else
@@ -393,7 +421,7 @@ function classify_leaf_block(stmts, varname, typename, fields, mod::Module)
          ctor_args=plan.ctor_args)
     end
     for s in prefix
-        check_only_field_reads(s, varname, fields)
+        check_only_field_reads(s, varname, fields, typename, mod)
     end
     return (kind=:leaf, leaf=leaf, prefix=prefix)
 end
@@ -416,6 +444,33 @@ end
 # Interprocedural inlining (one level, v1.1)
 # -----------------------------------------------------------------------
 
+"""Resolves a `Method.file` path to a file that actually exists on THIS
+machine. For a method compiled into a precompiled sysimage (any stdlib
+function on a downloaded binary release, not just user code),
+`Method.file` - and `Base.find_source_file`, confirmed empirically to
+NOT fix this case - can both still report the BUILD machine's own path
+(e.g. `C:\\workdir\\usr\\share\\julia\\stdlib\\v1.10\\Sockets\\src\\Sockets.jl`
+for `Sockets.bind` on this machine) rather than this install's real
+location. Falls back to locating the path's own `stdlib/vX.Y/...`
+suffix and rejoining it onto `Sys.STDLIB`, which - unlike `Method.file`
+itself - DOES resolve correctly for the running process, before giving
+up. Shared by `try_inline_helper` (v1.1) and `verify_safe_passthrough_arg`
+(v1.6) - both recover a helper's source this same way, and both were
+equally affected by this until it was caught testing v1.6 against real
+stdlib code (`Sockets.listenany`)."""
+function resolve_source_file(raw::AbstractString)
+    isfile(raw) && return raw
+    found = Base.find_source_file(raw)
+    found !== nothing && isfile(found) && return found
+    parts = splitpath(raw)
+    idx = findfirst(==("stdlib"), parts)
+    if idx !== nothing && idx + 2 <= length(parts)
+        candidate = joinpath(Sys.STDLIB, parts[idx+2:end]...)
+        isfile(candidate) && return candidate
+    end
+    return nothing
+end
+
 """Resolves `helper_name` to a single-method function taking exactly
 one argument, recovers its ORIGINAL source `Expr` via `functionloc` +
 re-reading and re-parsing the source file (the same reflection
@@ -437,8 +492,8 @@ function try_inline_helper(helper_name::Symbol, mod::Module, typename, fields)
     m = only(ms)
     m.nargs == 2 || throw(AsrDecline("helper must take exactly one argument"))
 
-    file = String(m.file)
-    isfile(file) || throw(AsrDecline("helper source file not found on disk"))
+    file = resolve_source_file(String(m.file))
+    file === nothing && throw(AsrDecline("helper source file not found on disk"))
     src = try
         read(file, String)
     catch
@@ -464,7 +519,7 @@ function try_inline_helper(helper_name::Symbol, mod::Module, typename, fields)
         throw(AsrDecline("helper reconstruction uses keyword/splat args"))
     length(ctor_args) == length(fields) || throw(AsrDecline("helper reconstruction field count mismatch"))
     for a in ctor_args
-        check_only_field_reads(a, qname, fields)
+        check_only_field_reads(a, qname, fields, typename, mod)
     end
 
     intermediate = hstmts[1:end-1]
@@ -474,42 +529,90 @@ function try_inline_helper(helper_name::Symbol, mod::Module, typename, fields)
             throw(AsrDecline("helper intermediate statement is not a simple assignment"))
         newvar, valexpr = s.args
         newvar isa Symbol || throw(AsrDecline("helper intermediate assignment target not a plain symbol"))
-        check_only_field_reads(valexpr, qname, fields)
+        check_only_field_reads(valexpr, qname, fields, typename, mod)
         push!(int_names, newvar)
     end
 
     return (qname=qname, intermediate=intermediate, int_names=int_names, ctor_args=ctor_args)
 end
 
-"""Finds a top-level `function name(...) ... end` definition by name in
-a `Meta.parseall`-produced `:toplevel` Expr. Not recursive - v1.1 only
-supports a helper defined as an ordinary top-level function, matching
-the "exactly one method" restriction already required above."""
-function find_function_def(toplevel, name::Symbol)
-    for s in toplevel.args
-        if Meta.isexpr(s, :function) && length(s.args) == 2
-            sig = s.args[1]
-            if Meta.isexpr(sig, :call) && sig.args[1] === name
-                return s
-            end
+"""Recursively finds EVERY function definition - long-form (`function
+f(...) ... end`) or short-form (`f(...) = ...`, which parses to the
+same `(sig, body)` shape, `body` wrapped in a `:block`) - matching
+`name`, at any depth reached through `:toplevel`/`:module`/`:block`/
+docstring-`:macrocall` wrappers. A real source file is typically its
+own `module X ... end` (confirmed against `Sockets.jl` while testing
+v1.6 against `Sockets.bind` - a flat top-level-only scan, this
+function's ORIGINAL v1.1 shape, silently found nothing and always had,
+for any module-wrapped file; never caught before because prior tests
+only exercised bare, module-free helper source). Does not recurse into
+arbitrary expressions (call arguments, other functions' own bodies,
+etc.) - only these specific "transparent" structural wrappers - to
+avoid false-positiving on an unrelated shadowed/local name."""
+function find_all_function_defs!(into::Vector, term, name::Symbol)
+    term isa Expr || return into
+    if Meta.isexpr(term, :function) && length(term.args) == 2
+        sig = term.args[1]
+        Meta.isexpr(sig, :call) && sig.args[1] === name && push!(into, term)
+    elseif Meta.isexpr(term, :(=)) && length(term.args) == 2
+        sig = term.args[1]
+        if Meta.isexpr(sig, :call) && sig.args[1] === name && Meta.isexpr(term.args[2], :block)
+            push!(into, term)
         end
     end
-    return nothing
+    if term.head in (:toplevel, :module, :block, :macrocall)
+        for a in term.args
+            find_all_function_defs!(into, a, name)
+        end
+    end
+    return into
+end
+
+"""Finds a `function name(...) ... end`/`name(...) = ...` definition by
+name anywhere in a `Meta.parseall`-produced `:toplevel` Expr (see
+`find_all_function_defs!`); the first match, matching the "exactly one
+method" restriction `try_inline_helper` already requires above (so
+there is at most one candidate arity to find in practice)."""
+function find_function_def(toplevel, name::Symbol)
+    candidates = find_all_function_defs!(Any[], toplevel, name)
+    return isempty(candidates) ? nothing : first(candidates)
 end
 
 gensym_name(varname::Symbol, inner::Symbol) = Symbol(varname, :_inl_, inner)
 
 """Walks Term for `varname`: a whole-node field read (Expr(:., varname,
 QuoteNode(f))) with f in fields is fine and not recursed into further;
-any other bare occurrence of the Symbol `varname` declines."""
-function check_only_field_reads(term, varname, fields)
+any other bare occurrence of the Symbol `varname` declines - UNLESS it's
+a positional argument to a call this transform can prove is a safe
+one-level pass-through (v1.6, `allow_call_passthrough` - see
+`verify_safe_passthrough_arg`), e.g. `Sockets.jl`'s
+`bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host,
+addr.port)`: `addr` appears bare as one of TWO arguments to `bind`, not
+as the reconstruction, so this is a different case from
+`try_inline_helper`'s `helper(varname)`-shaped sole-argument inlining.
+`allow_call_passthrough=false` when re-walking a resolved pass-through
+helper's own body, bounding this to exactly one level - a nested
+opaque call inside THAT body still declines, same discipline as v1.1's
+interprocedural inlining."""
+function check_only_field_reads(term, varname, fields, typename, mod::Module; allow_call_passthrough::Bool=true)
     if is_field_read(term, varname, fields)
         return
     elseif term isa Symbol
         term === varname && throw(AsrDecline("bare accumulator reference outside a field read"))
+    elseif Meta.isexpr(term, :call) && allow_call_passthrough
+        callee = term.args[1]
+        callargs = term.args[2:end]
+        for (i, a) in enumerate(callargs)
+            if a === varname
+                verify_safe_passthrough_arg(callee, i, callargs, typename, fields, mod) ||
+                    throw(AsrDecline("bare accumulator reference outside a field read"))
+            else
+                check_only_field_reads(a, varname, fields, typename, mod)
+            end
+        end
     elseif term isa Expr
         for a in term.args
-            check_only_field_reads(a, varname, fields)
+            check_only_field_reads(a, varname, fields, typename, mod; allow_call_passthrough=allow_call_passthrough)
         end
     end
 end
@@ -521,16 +624,134 @@ function is_field_read(term, varname, fields)
     return fieldnode.value in fields
 end
 
+"""One-level interprocedural safety check for the accumulator passed
+BARE as a non-sole positional argument to some other call (v1.6,
+distinct from `try_inline_helper`'s `helper(varname)`-shaped sole-arg
+inlining). Resolves `callee` via multiple dispatch to the SINGLE method
+whose signature accepts the accumulator's own declared type at the
+matching position - filtering by type at that position, not by
+`length(methods(f)) == 1` the way `try_inline_helper` does, since a
+stdlib function like `bind` genuinely has many methods across many
+files. Recovers that method's source (long- or short-form; a
+one-line short-form def is exactly `Sockets.jl`'s own
+`bind(sock, addr) = bind(sock, addr.host, addr.port)`) and confirms its
+own matching parameter is used ONLY via field reads throughout the
+ENTIRE method body - the same safety bar as everywhere else in this
+transform, just checked one level down, with no second level of
+pass-through allowed. Declines (returns false) on anything not cleanly
+resolvable: an unresolvable callee, zero or more than one applicable
+method, a parameter that isn't a plain (possibly `::Typed`) symbol, a
+method body this can't locate/parse, or any bare use of that parameter
+beyond a field read. `pos` is the accumulator's 1-indexed position
+among `callargs` - passed explicitly by the caller's own `enumerate`
+rather than re-derived via `findfirst(a -> a === arg, callargs)`, since
+Symbols are interned (`:p === :p` regardless of position) and a call
+with the accumulator appearing at more than one argument position
+(`f(p, p)`) would otherwise have every occurrence resolve to the
+FIRST position's index."""
+function verify_safe_passthrough_arg(callee, pos::Int, callargs, typename, fields, mod::Module)
+    callee isa Symbol || return false
+    f = try
+        Core.eval(mod, callee)
+    catch
+        nothing
+    end
+    (f !== nothing && f isa Function) || return false
+
+    T = resolve_type(mod, typename)
+    T === nothing && return false
+
+    nargs = length(callargs)
+
+    candidates = Method[]
+    for m in methods(f)
+        m.nargs == nargs + 1 || continue
+        # m.sig is a UnionAll (not a plain DataType with a .parameters
+        # field) for a parametric method (`f(x::Vector{T}) where T`) -
+        # unwrap first, same discipline as v1.4's struct-type handling.
+        # Caught via the corpus study: TOML.jl's `point_to_line` calls
+        # a parametric IO-printing method, which crashed this check
+        # with an uncaught `UnionAll has no field parameters` error
+        # before this fix - this transform must always cleanly decline
+        # an unsupported shape, never raise past `AsrDecline`.
+        sig_body = m.sig isa UnionAll ? Base.unwrap_unionall(m.sig) : m.sig
+        sig_body isa DataType || continue
+        params = sig_body.parameters
+        pos + 1 <= length(params) || continue
+        applicable = try
+            T <: params[pos+1]
+        catch
+            false
+        end
+        applicable && push!(candidates, m)
+    end
+    length(candidates) == 1 || return false
+    m = only(candidates)
+
+    file = resolve_source_file(String(m.file))
+    file === nothing && return false
+    src = try
+        read(file, String)
+    catch
+        return false
+    end
+    parsed = try
+        Meta.parseall(src; filename = file)
+    catch
+        return false
+    end
+    fdef = find_function_def_by_arity(parsed, callee, nargs)
+    fdef === nothing && return false
+
+    sig, body = fdef.args
+    Meta.isexpr(body, :block) || return false
+    sig_params = sig.args[2:end]
+    pos <= length(sig_params) || return false
+    pname = param_name(sig_params[pos])
+    pname === nothing && return false
+
+    return try
+        check_only_field_reads(body, pname, fields, typename, mod; allow_call_passthrough=false)
+        true
+    catch e
+        e isa AsrDecline || rethrow()
+        false
+    end
+end
+
+param_name(p::Symbol) = p
+function param_name(p)
+    Meta.isexpr(p, :(::), 2) && p.args[1] isa Symbol && return p.args[1]
+    return nothing
+end
+
+"""Finds a function definition (see `find_all_function_defs!` for the
+long-/short-form shapes and structural wrappers this looks through)
+matching `name` AND the given positional arity. Matching by arity too
+(not just name) matters here: the call site's own argument count
+already disambiguates which of possibly several same-named methods
+`verify_safe_passthrough_arg` resolved via dispatch above, and
+re-matching by name alone in this function could hit an unrelated
+same-named method with a different signature entirely."""
+function find_function_def_by_arity(toplevel, name::Symbol, nargs::Int)
+    candidates = find_all_function_defs!(Any[], toplevel, name)
+    for s in candidates
+        sig = s.args[1]
+        length(sig.args) - 1 == nargs && return s
+    end
+    return nothing
+end
+
 """Walks post-loop statements for uses of `varname`: field reads are
 fine anywhere; at most one bare occurrence is allowed, and only as a
 `return varname` statement or the function's bare trailing expression."""
-function classify_post(post_stmts, varname, fields)
+function classify_post(post_stmts, varname, fields, typename, mod::Module)
     for (i, s) in enumerate(post_stmts)
         is_tail = (i == length(post_stmts))
         if is_tail && is_bare_return_or_tail(s, varname)
             continue
         end
-        check_only_field_reads(s, varname, fields)
+        check_only_field_reads(s, varname, fields, typename, mod)
     end
 end
 
@@ -610,15 +831,16 @@ function rewrite_pre_multi(pre_stmts, accum_plans)
 end
 
 """Folds `subst_field_reads` over every accumulator's own (varname,
-scalar_names) pair - each pass only touches its own accumulator's field
-reads, leaving everything else (including other accumulators' field
-reads, substituted in a later pass) untouched, so a single reconstruction
+scalar_names, typename, fields) tuple - each pass only touches its own
+accumulator's field reads (and passthrough call-site reboxing, v1.6),
+leaving everything else (including other accumulators' field reads,
+substituted in a later pass) untouched, so a single reconstruction
 expression that reads a DIFFERENT accumulator's fields directly (e.g.
 one twobody accumulator reading the other's old value) still resolves
 correctly regardless of substitution order."""
 function subst_all(term, subs)
-    for (vn, sn) in subs
-        term = subst_field_reads(term, vn, sn)
+    for (vn, sn, tn, fs) in subs
+        term = subst_field_reads(term, vn, sn, tn, fs)
     end
     return term
 end
@@ -725,7 +947,7 @@ function rewrite_post_multi(post_stmts, accum_plans, subs)
         owner = is_tail ? findfirst(ap -> is_bare_return_or_tail(s, ap.varname), accum_plans) : nothing
         if owner !== nothing
             ap = accum_plans[owner]
-            rebox = Expr(:call, ap.typename, [ap.scalar_names[f] for f in ap.fields]...)
+            rebox = rebox_call(ap.typename, ap.scalar_names, ap.fields)
             if Meta.isexpr(s, :return)
                 push!(out, Expr(:return, rebox))
             else
@@ -738,18 +960,34 @@ function rewrite_post_multi(post_stmts, accum_plans, subs)
     return out
 end
 
+rebox_call(typename, scalar_names, fields) = Expr(:call, typename, [scalar_names[f] for f in fields]...)
+
 """Replaces every whole-node field read Expr(:., varname, QuoteNode(f))
-with the scalar variable for f. Generic recursion otherwise; never
-recurses into a matched field-read node's own children."""
-function subst_field_reads(term, varname, scalar_names)
+with the scalar variable for f; never recurses into a matched
+field-read node's own children. A bare occurrence of `varname` as a
+call argument (v1.6) is replaced with a freshly re-boxed
+`typename(scalar1, scalar2, ...)` at that exact call site - by
+construction (qualification already ran `check_only_field_reads` over
+this same term and would have declined otherwise), the ONLY way a bare
+`varname` Symbol can still be present here is as a verified-safe
+passthrough call argument, so no re-verification is needed, just the
+rebox. Generic recursion otherwise."""
+function subst_field_reads(term, varname, scalar_names, typename, fields)
     if Meta.isexpr(term, :., 2)
         recv, fieldnode = term.args
         if recv === varname && fieldnode isa QuoteNode && haskey(scalar_names, fieldnode.value)
             return scalar_names[fieldnode.value]
         end
     end
+    if Meta.isexpr(term, :call)
+        callee = term.args[1]
+        newargs = [a === varname ? rebox_call(typename, scalar_names, fields) :
+                                    subst_field_reads(a, varname, scalar_names, typename, fields)
+                   for a in term.args[2:end]]
+        return Expr(:call, callee, newargs...)
+    end
     if term isa Expr
-        return Expr(term.head, [subst_field_reads(a, varname, scalar_names) for a in term.args]...)
+        return Expr(term.head, [subst_field_reads(a, varname, scalar_names, typename, fields) for a in term.args]...)
     end
     return term
 end

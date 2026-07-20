@@ -27,7 +27,7 @@ redefinition; `Revise.jl`-mediated redefinition during interactive
 development is a separate, not-yet-checked case, so this claim is
 explicitly scoped to non-Revise sessions.
 
-## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator) + v1.4 (parametric structs) + v1.5 (if-dispatch fix)
+## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator) + v1.4 (parametric structs) + v1.5 (if-dispatch fix) + v1.6 (non-sole-argument opaque-call passthrough)
 
 | Concept | This port |
 |---|---|
@@ -42,6 +42,7 @@ explicitly scoped to non-Revise sessions.
 | Multi-accumulator fixpoint (cpython-asr v1.2) | `AsrTransform.find_and_classify_accumulators` - every candidate position qualifies fully independently (cross-accumulator field reads are already tolerated for free), combined via a cross-accumulator collision check and a `subs`-list substitution fold (`subst_all`) threaded through every rewrite function so one accumulator's reconstruction can read another's fields directly |
 | Parametric structs (v1.4, corpus-study finding) | `try_accumulator_stmt` unwraps a `UnionAll` (e.g. `InetAddr{T<:IPAddr}`) via `Base.unwrap_unionall` before checking `isstructtype`/`ismutabletype`/`fieldnames` - field shape is fixed by the struct's own declaration, never by which concrete type parameter a given call instantiates, so nothing else in the module needed to change: `typename` was already a bare Symbol everywhere, and the reconstruction call this transform emits is the same syntactic shape (`TypeName(args...)`) the original code used, letting Julia's own type-parameter inference resolve it identically either way. Requires the bare-call form (`Paramed(...)`); an explicit `Paramed{Float64}(...)` still declines, since the constructor callee is then an `Expr(:curly,...)`, not a Symbol |
 | If-dispatch fix (v1.5, corpus-study finding) | `classify_loop` no longer dispatches *any* top-level `if` statement to `classify_branch_tree` unconditionally - `if_tree_attempts_reconstruction` is a non-throwing pre-check that only commits to that stricter validation (mandatory terminal else included) when at least one leaf's own last statement actually looks like `varname = ...(...)`; an unrelated guard clause (no leaf resembling a reconstruction) falls through to the same generic `check_only_field_reads` safety check any other ordinary statement gets, so it no longer blocks a genuine reconstruction appearing later in the loop body |
+| Non-sole-argument opaque-call passthrough (v1.6, corpus-study finding) | `verify_safe_passthrough_arg` - the accumulator passed bare as one of SEVERAL arguments to a call (`bind(sock, addr)`, distinct from v1.1's `helper(varname)`-shaped sole-argument inlining) is safe when the callee's single applicable method, resolved via multiple dispatch on the accumulator's own type at that position, only reads that parameter's fields; the rewrite phase re-boxes in place (`rebox_call`) since qualification having passed guarantees no other shape can survive there. Two more, genuinely pre-existing v1.1 bugs surfaced fixing this - both invisible until tested against real stdlib source: `Method.file` reports the BUILD machine's own path for sysimage-compiled code (`resolve_source_file`), and a real source file is typically its own `module X ... end`, which the original flat top-level-only helper-source scan never recursed into (`find_all_function_defs!`) |
 
 Motivated directly by `corpus-study/README.md`'s own findings, each
 verified against real code, not just reasoned about in the abstract:
@@ -62,31 +63,44 @@ one that passes the accumulator bare into an opaque call (exactly
 now for the *true* reason ("bare accumulator reference outside a field
 read") rather than the previous false one. **`listenany` itself still
 declines post-v1.5**, for that true, structurally different reason -
-the transform correctly refuses to reason about whether `bind`
-retains/aliases `addr`, and there is currently no shape in this
-transform (inlining included) that can safely accept an accumulator
-passed bare into a multi-argument opaque call. Re-running the full
-corpus study confirms this is not an isolated case: **0 of 15
-candidates qualify even after both v1.4 and v1.5** - both fixes are
-real, verified, and each closes a genuine gap, but this specific
-corpus's own 15 candidates each have their own separate, additional
-reason to decline (see `corpus-study/README.md` for the complete,
-updated breakdown).
+`bind(sock, addr)` passes `addr` bare as one of TWO arguments, a shape
+v1.1's own sole-argument-only inlining never covered. Re-running the
+full corpus study after v1.4+v1.5 confirmed this was not an isolated
+case: 0 of 15 candidates qualified.
+
+**v1.6 closes this third gap.** `bind`'s own `InetAddr` method -
+`bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host,
+addr.port)` - is itself a one-line destructuring pass-through that only
+reads `addr`'s fields, so it's genuinely safe; `verify_safe_passthrough_arg`
+resolves the callee via multiple dispatch to the single applicable
+method (filtered by the accumulator's own type at the matching
+position, not `length(methods(f)) == 1` - `bind` has many methods) and
+confirms that method's matching parameter is used only via field reads,
+one level deep. Getting there surfaced two more real, previously-latent
+v1.1 bugs, both invisible until tested against actual stdlib source
+rather than hand-written test helpers: `Method.file` reports the BUILD
+machine's own path for anything compiled into a precompiled sysimage,
+not this install's real location; and a real source file is typically
+its own `module X ... end`, which the original flat top-level-only
+helper-source scan never recursed into at all. Both are fixed for v1.1
+too, not just v1.6. With all three gaps closed, `Sockets.listenany`
+qualifies end-to-end - confirmed via the gate-faithful oracle AND by
+actually running the rewritten function (including its retry-on-taken-port
+path) and comparing output to the baseline. **The corpus study now
+shows 1 of 15 candidates qualifying** (see `corpus-study/README.md` for
+the complete, updated breakdown).
 
 Explicitly deferred: `for` loops as an alternative to `while`; mutable
 structs / direct field-mutation mode (`cpython-asr`'s v1.4 analog, 3 of
-15 corpus-study hits); two-level (chained) interprocedural inlining; a
-`while` loop wrapped in a performance macro like
-`@inbounds`/`@simd`/`@fastmath`; an accumulator passed bare into a
-multi-argument opaque call (would need real interprocedural purity
-analysis, well beyond `try_inline_helper`'s own narrow
-single-argument-passthrough scope - this is what still blocks
-`Sockets.listenany` after v1.4 and v1.5 both).
+15 corpus-study hits); two-level (chained) interprocedural inlining
+and two-level opaque-call passthrough (v1.1/v1.6 both stop at one
+level); a `while` loop wrapped in a performance macro like
+`@inbounds`/`@simd`/`@fastmath`.
 
 ## Layout
 
 - `src/AsrTransform.jl` - the `@asr` macro entry point, qualification (phase 1), and rewrite (phase 2)
-- `test/runtests.jl` - `Test`-based tests, 15 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, parametric struct, unrelated guard clause not blocking a later reconstruction, plus a structural check) and 26 negative/abort-safe cases - see the module docstring and test file for the full list
+- `test/runtests.jl` - `Test`-based tests, 15 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, parametric struct, unrelated guard clause not blocking a later reconstruction, plus a structural check) and 30 negative/abort-safe cases, including v1.6's non-sole-argument opaque-call passthrough (long-form, short-form, ambiguous-dispatch decline, parametric-method regression) - see the module docstring and test file for the full list
 - `benchmarks/` - all 14 benchmarks from the paper's Table 1, ported from FOL's `benchmarks/fol-code/asr-*.fol`; see `benchmarks/README.md` for results, including two genuinely different findings from the other ports: near-zero measured speedup for 13 of 14 (Julia's own JIT already eliminates the allocation), and a measured *regression* (0.87x) for Kalman specifically, where ASR's own temp-staging overhead outweighs an allocation win that was already free
 - `corpus-study/` - a shape-recognizing analyzer run against Julia 1.10's *entire* Base plus 12 stdlib modules (365 files, 272K LOC - small enough to cover exhaustively, unlike the other ports' own sampled corpora), measuring ASR candidate-loop density and hand-auditing why all 15 record-shaped hits found decline; see `corpus-study/README.md`
 
