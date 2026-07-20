@@ -154,6 +154,87 @@ builders, a handful more Pass-1 false positives like `T`/`Expr`/
 `GateCheck`'s simple name-based function lookup found a different
 same-named method than Pass 1 scanned).
 
+**Would multi-loop support help?** A cheap Pass-1-only extension
+(`scan_all_top_level_loops`, exploratory - `AsrTransform` has no
+multi-loop qualification path, so every candidate found this way still
+declines at Pass 2) scanned the remaining `multi_while`/`has_for`/
+`mixed` bucket (858 functions, never checked before) and found 87 more
+raw candidates - dominated by `Ref` again (106, much the same
+population re-counted across multiple loop positions, an acknowledged
+overlap in this approximate scan) plus, new this time, Julia's own
+compiler-internals mutable IR types (`CFG`, `IncrementalCompact`,
+`BitSetBoundedMinPrioritySet`). Sampling these directly
+(`compiler/ssair/ir.jl :: complete`'s `cfg::CFG`) confirmed the exact
+same pattern: genuinely mutable, inherently graph-like data structures
+that need real reference semantics for the algorithm's own correctness,
+not reconstructed records. **Conclusion: multi-loop support would not
+meaningfully help** - the wall is the same wall, at similar scale, not
+a structurally different population. Not built.
+
+**Would mutable-struct field-mutation mode help?** (`p.field = expr`,
+`cpython-asr`'s v1.4 analog - the feature most naturally suggested by
+"12 of 14 declining `while` candidates are mutable structs.") Checked
+directly before implementing, not assumed: 7 real declining candidates
+were read at the source level across every domain sampled (Base arrays,
+Base compiler internals, REPL, JuliaSyntax, LinearAlgebra) -
+`normalize_key`'s `IOBuffer` (mutated via `write(buf, c)`/`take!(buf)`),
+`tokenize`'s `ParseStream` (mutated via `parse!(ps, ...)`),
+`gebrd!`'s `Ref{BlasInt}` (mutated via a ccall out-parameter,
+genuinely un-eliminable - native code writes through the raw pointer),
+`map_n!`'s `LinearIndices` and `_show_nd`'s `CartesianIndices` (not
+accumulators at all - Pass-1 false positives, used only as the loop's
+OWN iteration source, never touched inside the body), and
+`count_const_size`'s `DataTypeFieldDesc` (a read-only lookup table,
+same story). **7 of 7: zero used bare `p.field = expr` anywhere.**
+Idiomatic Julia mutates through the type's own API methods almost
+universally, not direct field assignment - a genuine, if unexpected,
+cultural difference from `cpython-asr`'s own `self.x = expr` target
+(Python's non-frozen-dataclass idiom, which DOES commonly write fields
+directly). **Conclusion: mutable-struct field-mutation mode, as
+classically scoped, would very likely have near-zero yield in this
+corpus.** Not built; the evidence pointed toward a different, larger
+extension instead (below).
+
+**Update (v1.8)**: given `IOBuffer`/`ParseStream`/`Ref` are all mutated
+through opaque STDLIB METHOD calls rather than direct field assignment,
+the natural question became whether v1.6's own opaque-call-passthrough
+check (`verify_safe_passthrough_arg`) could be generalized to reach
+through such calls - it was already capable of proving a callee safe
+when its body is field-*read*-only, just hard-capped at exactly one
+level deep. FOL's own project has real prior art for exactly this kind
+of generalization: an interprocedural summary-inference system built
+for its PLDI 2027 escape-analysis paper
+(`../../FOL/fol/docs/escape-analysis-design.md`,
+`../../FOL/fol/src/summary-inference.lisp`) that infers each function's
+own effect on its parameters from its body (not hand-annotated),
+memoized over a call graph with cycle handling via fixpoint iteration.
+`cpython-asr` has no equivalent (its own interprocedural reach stops at
+v1.1-style single-method inlining, same ceiling Julia-asr had before
+this). v1.8 is a narrow port of that idea: `check_method_param_safe`
+recurses to arbitrary depth (bounded by `MAX_PASSTHROUGH_DEPTH`),
+memoizing each `(Method, position)` result in a `cache` threaded
+through `check_only_field_reads`, with a `:computing` sentinel making a
+cyclic call chain resolve to "unsafe" rather than looping forever.
+Confirmed working via a dedicated test (a genuine two-level
+pass-through chain, declined under v1.6's cap, now qualifies - verified
+STRUCTURALLY, not just by output equality, since "declined and fell
+back to the unchanged original" would trivially also pass an
+equality-only check) and a cyclic chain correctly declining.
+
+**Re-running the corpus study found zero additional qualifying
+candidates - the honest, expected result, not a surprise.** This was
+scoped correctly going in: `IOBuffer`/`ParseStream`/`Ref` need
+MUTATION-awareness (does this call write into the object, and does
+that observably escape?), not more DEPTH on an already-supported
+read-only shape - v1.8 generalized the wrong axis for these specific
+candidates, by design, since building mutation-aware summaries is a
+materially larger undertaking than depth-generalizing a read-only
+check, and this session scoped v1.8 to the smaller, well-understood
+piece rather than attempt the larger one speculatively. The
+depth-generalization itself is real, tested, shipped capability - it
+simply doesn't happen to be what this corpus's own remaining candidates
+need.
+
 **A real methodological difference from the sibling studies, not just a
 smaller number**: Erlang/OTP and the Python package ecosystem are both
 far too large to scan exhaustively, so BEAM-asr and cpython-asr each
@@ -377,7 +458,7 @@ independent of whether `@asr` could handle it.
   transform during Pass 2 exactly as they'd run in production - a
   candidate declining here is a genuine decline under the current
   shipped rules, not an artifact of a simplified study-only checker.
-- **1-of-15 qualifying should not be read as "ASR barely applies to
+- **1-of-247 qualifying should not be read as "ASR barely applies to
   real Julia code"** - `benchmarks/README.md` demonstrates the
   mechanism itself works correctly end-to-end (14/14 synthetic
   benchmarks correct, speedup near 1.0x for the reason above, not
@@ -385,12 +466,13 @@ independent of whether `@asr` could handle it.
   it working correctly on real, unmodified stdlib source, retry loop
   and all. This study's finding is still mostly about *incidence*, not
   *correctness*: real Julia standard-library code needing loop-carried
-  state overwhelmingly reaches for mutable objects or `for` loops -
-  shapes `@asr` doesn't target at all - rather than the specific
-  immutable-record-rebuilt-via-`while` pattern the transform
-  recognizes; but where that shape genuinely occurs, v1.4-v1.6 show the
-  transform can be pushed, with real (not speculative) fixes, all the
-  way to actually handling it.
+  state overwhelmingly reaches for mutable, reference-semantics objects
+  mutated through opaque method calls - shapes `@asr` doesn't target at
+  all (confirmed directly, not inferred, across every domain sampled)
+  - rather than the specific immutable-record-rebuilt-via-loop pattern
+  the transform recognizes; but where that shape genuinely occurs,
+  v1.4-v1.8 show the transform can be pushed, with real (not
+  speculative) fixes, all the way to actually handling it.
 
 ## Three real, verified fixes - one net new qualification, and the trail that got there
 

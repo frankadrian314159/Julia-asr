@@ -107,6 +107,34 @@ true`), not a concrete struct at all, and it mutates via `x[] = ...`
 alone wouldn't cover it either. See `corpus-study/README.md` for the
 full breakdown.
 
+v1.8 generalizes `verify_safe_passthrough_arg` from v1.6's hard
+one-level cap to arbitrary depth (bounded by `MAX_PASSTHROUGH_DEPTH`),
+via real per-`(Method, position)` summaries memoized in a `cache`
+threaded through `check_only_field_reads` - a genuine, if narrow, port
+of the same idea behind FOL's own interprocedural summary-inference
+system (`docs/escape-analysis-design.md`, `src/summary-inference.lisp`
+in the FOL repo: infer a callee's own effect on its parameters from its
+body rather than requiring hand-written annotations, memoized over a
+call graph, cycle-safe via a `:computing` sentinel during fixpoint
+resolution - `check_method_param_safe` is this module's analog).
+Confirmed working via a dedicated test (a genuine two-level pass-through
+chain, declined under v1.6's cap, now qualifies - verified structurally,
+not just by output equality, since a decline-and-fall-back-unchanged
+would trivially also pass an output-equality-only check) and a cyclic
+chain correctly declining rather than looping. Re-running the corpus
+study afterward, however, found **zero additional qualifying
+candidates** - not a bug in this generalization, but confirmation of a
+prior finding investigated directly (source-read, not inferred):
+`IOBuffer`/`ParseStream`/`Ref`-style real code is mutated through
+opaque STDLIB METHOD CALLS (`write`, `parse!`, ccall out-params), which
+this check can still only verify as safe when the callee's body is
+field-*read*-only - it was never depth that was missing for these
+cases, and depth was the only thing v1.8 added. Real progress on this
+front would need summaries that can also reason about MUTATION (does
+this call write into the object, and does that observably escape?), a
+materially different and larger extension than depth-generalizing an
+already-supported read-only shape.
+
 See Julia-asr design notes for the full qualification/rewrite spec
 this module implements.
 
@@ -666,35 +694,42 @@ gensym_name(varname::Symbol, inner::Symbol) = Symbol(varname, :_inl_, inner)
 QuoteNode(f))) with f in fields is fine and not recursed into further;
 any other bare occurrence of the Symbol `varname` declines - UNLESS it's
 a positional argument to a call this transform can prove is a safe
-one-level pass-through (v1.6, `allow_call_passthrough` - see
-`verify_safe_passthrough_arg`), e.g. `Sockets.jl`'s
-`bind(sock::TCPServer, addr::InetAddr) = bind(sock, addr.host,
-addr.port)`: `addr` appears bare as one of TWO arguments to `bind`, not
-as the reconstruction, so this is a different case from
+pass-through (v1.6 introduced this for exactly one level; v1.8
+generalizes it to arbitrary depth via real per-method summaries, see
+`verify_safe_passthrough_arg`/`check_method_param_safe`), e.g.
+`Sockets.jl`'s `bind(sock::TCPServer, addr::InetAddr) = bind(sock,
+addr.host, addr.port)`: `addr` appears bare as one of TWO arguments to
+`bind`, not as the reconstruction, so this is a different case from
 `try_inline_helper`'s `helper(varname)`-shaped sole-argument inlining.
-`allow_call_passthrough=false` when re-walking a resolved pass-through
-helper's own body, bounding this to exactly one level - a nested
-opaque call inside THAT body still declines, same discipline as v1.1's
-interprocedural inlining."""
-function check_only_field_reads(term, varname, fields, typename, mod::Module; allow_call_passthrough::Bool=true)
+`depth` counts how many opaque-call boundaries have already been
+crossed (0 at the top level of a statement being checked; incremented
+by exactly one each time `check_method_param_safe` re-walks a resolved
+callee's own body) and is bounded by `MAX_PASSTHROUGH_DEPTH` rather
+than v1.6's original hard one-level cap; `cache` memoizes each
+`(Method, position)` summary already computed within this same
+top-level check (shared across the whole recursive walk, not reset per
+call) both for efficiency and to make a cyclic call chain (`f` calls
+`g` calls `f`) resolve to "unsafe" via its `:computing` sentinel rather
+than infinite-looping."""
+function check_only_field_reads(term, varname, fields, typename, mod::Module; depth::Int=0, cache::Dict=Dict())
     if is_field_read(term, varname, fields)
         return
     elseif term isa Symbol
         term === varname && throw(AsrDecline("bare accumulator reference outside a field read"))
-    elseif Meta.isexpr(term, :call) && allow_call_passthrough
+    elseif Meta.isexpr(term, :call)
         callee = term.args[1]
         callargs = term.args[2:end]
         for (i, a) in enumerate(callargs)
             if a === varname
-                verify_safe_passthrough_arg(callee, i, callargs, typename, fields, mod) ||
+                verify_safe_passthrough_arg(callee, i, callargs, typename, fields, mod, depth, cache) ||
                     throw(AsrDecline("bare accumulator reference outside a field read"))
             else
-                check_only_field_reads(a, varname, fields, typename, mod)
+                check_only_field_reads(a, varname, fields, typename, mod; depth=depth, cache=cache)
             end
         end
     elseif term isa Expr
         for a in term.args
-            check_only_field_reads(a, varname, fields, typename, mod; allow_call_passthrough=allow_call_passthrough)
+            check_only_field_reads(a, varname, fields, typename, mod; depth=depth, cache=cache)
         end
     end
 end
@@ -706,32 +741,30 @@ function is_field_read(term, varname, fields)
     return fieldnode.value in fields
 end
 
-"""One-level interprocedural safety check for the accumulator passed
-BARE as a non-sole positional argument to some other call (v1.6,
-distinct from `try_inline_helper`'s `helper(varname)`-shaped sole-arg
-inlining). Resolves `callee` via multiple dispatch to the SINGLE method
-whose signature accepts the accumulator's own declared type at the
-matching position - filtering by type at that position, not by
+"""Depth bound for the recursive interprocedural safety check (v1.8) -
+a real if simple guard against pathological call chains, the same kind
+of pragmatic bound real compilers put on inlining depth. Not reached by
+any known real example (`Sockets.bind`'s own chain is depth 1); exists
+so an adversarial or accidentally-deep chain declines cleanly rather
+than doing unbounded source-file recovery and re-parsing."""
+const MAX_PASSTHROUGH_DEPTH = 5
+
+"""Interprocedural safety check for the accumulator passed BARE as a
+non-sole positional argument to some other call (v1.6, distinct from
+`try_inline_helper`'s `helper(varname)`-shaped sole-arg inlining).
+Resolves `callee` via multiple dispatch to the SINGLE method whose
+signature accepts the accumulator's own declared type at the matching
+position - filtering by type at that position, not by
 `length(methods(f)) == 1` the way `try_inline_helper` does, since a
 stdlib function like `bind` genuinely has many methods across many
-files. Recovers that method's source (long- or short-form; a
-one-line short-form def is exactly `Sockets.jl`'s own
-`bind(sock, addr) = bind(sock, addr.host, addr.port)`) and confirms its
-own matching parameter is used ONLY via field reads throughout the
-ENTIRE method body - the same safety bar as everywhere else in this
-transform, just checked one level down, with no second level of
-pass-through allowed. Declines (returns false) on anything not cleanly
-resolvable: an unresolvable callee, zero or more than one applicable
-method, a parameter that isn't a plain (possibly `::Typed`) symbol, a
-method body this can't locate/parse, or any bare use of that parameter
-beyond a field read. `pos` is the accumulator's 1-indexed position
-among `callargs` - passed explicitly by the caller's own `enumerate`
-rather than re-derived via `findfirst(a -> a === arg, callargs)`, since
-Symbols are interned (`:p === :p` regardless of position) and a call
-with the accumulator appearing at more than one argument position
-(`f(p, p)`) would otherwise have every occurrence resolve to the
-FIRST position's index."""
-function verify_safe_passthrough_arg(callee, pos::Int, callargs, typename, fields, mod::Module)
+files. v1.8: memoizes the result per `(Method, position)` in `cache`
+(shared across the whole top-level check) and recurses to arbitrary
+depth (bounded by `MAX_PASSTHROUGH_DEPTH`) via `check_method_param_safe`
+rather than v1.6's original hard one-level cap - a method whose own
+body passes the parameter on to ANOTHER opaque call is no longer an
+automatic decline; that call gets the same treatment, recursively."""
+function verify_safe_passthrough_arg(callee, pos::Int, callargs, typename, fields, mod::Module, depth::Int, cache::Dict)
+    depth >= MAX_PASSTHROUGH_DEPTH && return false
     callee isa Symbol || return false
     f = try
         Core.eval(mod, callee)
@@ -770,6 +803,23 @@ function verify_safe_passthrough_arg(callee, pos::Int, callargs, typename, field
     length(candidates) == 1 || return false
     m = only(candidates)
 
+    key = (m, pos)
+    haskey(cache, key) && return cache[key] === :safe
+    cache[key] = :computing  # cycle sentinel: f calls g calls f resolves to unsafe, not an infinite loop
+    result = check_method_param_safe(m, callee, pos, nargs, fields, typename, mod, depth, cache)
+    cache[key] = result ? :safe : :unsafe
+    return result
+end
+
+"""Recovers method `m`'s own source (long- or short-form; handles the
+BUILD-machine stale-path and module-wrapper-scan issues both fixed for
+v1.1 in `resolve_source_file`/`find_all_function_defs!`) and confirms
+its parameter at `pos` is used only via field reads OR further
+pass-through calls whose OWN summary is safe - recursed one level
+deeper via `check_only_field_reads(body, ...; depth=depth+1, cache=cache)`,
+which is what actually generalizes v1.6's original one-level-only cap
+into real, depth-bounded interprocedural reach."""
+function check_method_param_safe(m::Method, callee, pos, nargs, fields, typename, mod::Module, depth, cache)
     file = resolve_source_file(String(m.file))
     file === nothing && return false
     src = try
@@ -793,7 +843,7 @@ function verify_safe_passthrough_arg(callee, pos::Int, callargs, typename, field
     pname === nothing && return false
 
     return try
-        check_only_field_reads(body, pname, fields, typename, mod; allow_call_passthrough=false)
+        check_only_field_reads(body, pname, fields, typename, mod; depth=depth + 1, cache=cache)
         true
     catch e
         e isa AsrDecline || rethrow()

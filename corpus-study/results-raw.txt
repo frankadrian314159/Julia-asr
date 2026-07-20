@@ -2,27 +2,27 @@
 File                                                   Domain               LOC  Loop SingleW Hits
 Base.jl                                                base                   629    0       0    0
 Enums.jl                                               base                   239    1       0    0
-abstractarray.jl                                       base                  3547   43       1    1
+abstractarray.jl                                       base                  3547   43       1    4
 abstractarraymath.jl                                   base                   519    5       0    0
 abstractdict.jl                                        base                   625    9       0    0
 abstractset.jl                                         base                   530    9       0    0
 accumulate.jl                                          base                   445    4       0    0
 array.jl                                               base                  2869   41       5    0
 arraymath.jl                                           base                   285    5       0    0
-arrayshow.jl                                           base                   594    7       0    0
+arrayshow.jl                                           base                   594    7       0    1
 asyncevent.jl                                          base                   355    1       1    0
 asyncmap.jl                                            base                   404    2       1    0
 atomics.jl                                             base                   462    1       1    0
 baseext.jl                                             base                    47    0       0    0
 binaryplatforms.jl                                     base                  1102    6       0    0
-bitarray.jl                                            base                  1945   41       7    2
+bitarray.jl                                            base                  1945   41       7    6
 bitset.jl                                              base                   420   10       1    0
 bool.jl                                                base                   187    0       0    0
 boot.jl                                                base                   860    0       0    0
 broadcast.jl                                           base                  1392    6       1    0
 build_h.jl                                             base                    20    0       0    0
 c.jl                                                   base                   721    6       2    1
-cartesian.jl                                           base                   415    4       1    0
+cartesian.jl                                           base                   415    4       1    1
 channels.jl                                            base                   627    0       0    0
 char.jl                                                base                   340    1       1    0
 checked.jl                                             base                   370    0       0    0
@@ -75,15 +75,15 @@ libdl.jl                                               base                   31
 libuv.jl                                               base                   167    0       0    0
 linked_list.jl                                         base                   153    2       2    0
 linking.jl                                             base                   170    2       0    0
-loading.jl                                             base                  3236   41       3    1
+loading.jl                                             base                  3236   41       3    2
 lock.jl                                                base                   496    0       0    0
 locks-mt.jl                                            base                    76    1       1    0
-logging.jl                                             base                   699    5       1    0
+logging.jl                                             base                   699    5       1    4
 math.jl                                                base                  1595    7       1    0
 mathconstants.jl                                       base                   133    0       0    0
 meta.jl                                                base                   464    3       0    0
 methodshow.jl                                          base                   501    7       0    0
-missing.jl                                             base                   468    4       1    0
+missing.jl                                             base                   468    4       1    2
 mpfr.jl                                                base                  1163    5       0    1
 multidimensional.jl                                    base                  1934   12       2    0
 multimedia.jl                                          base                   430    6       0    0
@@ -120,14 +120,14 @@ reshapedarray.jl                                       base                   35
 rounding.jl                                            base                   257    0       0    0
 secretbuffer.jl                                        base                   220    5       0    0
 set.jl                                                 base                   891   15       3    0
-shell.jl                                               base                   469    9       1    0
-show.jl                                                base                  3268   37       2    2
+shell.jl                                               base                   469    9       1    3
+show.jl                                                base                  3268   37       2   12
 simdloop.jl                                            base                   140    2       0    0
 slicearray.jl                                          base                   246    0       0    0
 some.jl                                                base                   148    0       0    0
 sort.jl                                                base                  2228   19       3    0
-stacktraces.jl                                         base                   411    6       1    0
-stat.jl                                                base                   497    3       0    0
+stacktraces.jl                                         base                   411    6       1    1
+stat.jl                                                base                   497    3       0    1
 stream.jl                                              base                  1578    3       3    0
 subarray.jl                                            base                   497    1       0    0
 summarysize.jl                                         base                   197    2       1    1
@@ -176,7 +176,7 @@ JuliaSyntax\sysimage\JuliaSyntaxCore\src\JuliaSyntaxCore.jlbase                 
 JuliaSyntax\test\benchmark.jl                          base                    36    1       0    1
 JuliaSyntax\test\diagnostics.jl                        base                   242    0       0    0
 JuliaSyntax\test\expr.jl                               base                   736    0       0    0
-JuliaSyntax\test\fuzz_test.jl                          base                  1026    3       0    0
+JuliaSyntax\test\fuzz_test.jl                          base                  1026    3       0    1
 JuliaSyntax\test\green_node.jl                         base                    55    0       0    0
 JuliaSyntax\test\hooks.jl                              base                   196    0       0    0
 JuliaSyntax\test\literal_parsing.jl                    base                   257    0       0    0
@@ -194,7 +194,7 @@ JuliaSyntax\test\utils.jl                              base                    2
 JuliaSyntax\tools\check_all_packages.jl                base                   100    0       0    0
 JuliaSyntax\tools\registry_download.jl                 base                    47    0       0    0
 JuliaSyntax\tools\untar_packages.jl                    base                    69    0       0    0
-compiler\abstractinterpretation.jl                     base                  3202   27       0    0
+compiler\abstractinterpretation.jl                     base                  3202   27       0    1
 compiler\abstractlattice.jl                            base                   309    0       0    0
 compiler\bootstrap.jl                                  base                    52    0       0    0
 compiler\cicache.jl                                    base                    73    0       0    0
@@ -208,7 +208,7 @@ compiler\parsing.jl                                    base                    2
 compiler\sort.jl                                       base                   101    1       0    0
 compiler\stmtinfo.jl                                   base                   226    1       0    0
 compiler\tfuncs.jl                                     base                  2955   13       0    0
-compiler\typeinfer.jl                                  base                  1140   12       1    0
+compiler\typeinfer.jl                                  base                  1140   12       1    4
 compiler\typelattice.jl                                base                   800   10       0    0
 compiler\typelimits.jl                                 base                   849    8       0    0
 compiler\types.jl                                      base                   511    0       0    0
@@ -219,15 +219,15 @@ compiler\ssair\basicblock.jl                           base                    3
 compiler\ssair\domtree.jl                              base                   717   12       3    0
 compiler\ssair\driver.jl                               base                    25    0       0    0
 compiler\ssair\heap.jl                                 base                    75    1       0    0
-compiler\ssair\inlining.jl                             base                  1901   18       0    1
+compiler\ssair\inlining.jl                             base                  1901   18       0    3
 compiler\ssair\ir.jl                                   base                  1891   23       1    2
-compiler\ssair\irinterp.jl                             base                   389    2       0    0
+compiler\ssair\irinterp.jl                             base                   389    2       0    2
 compiler\ssair\legacy.jl                               base                   102    2       0    0
-compiler\ssair\passes.jl                               base                  2239   23       4    2
-compiler\ssair\show.jl                                 base                  1029   11       2    0
-compiler\ssair\slot2ssa.jl                             base                   968   12       0    0
+compiler\ssair\passes.jl                               base                  2239   23       4   24
+compiler\ssair\show.jl                                 base                  1029   11       2    1
+compiler\ssair\slot2ssa.jl                             base                   968   12       0    6
 compiler\ssair\verify.jl                               base                   344    3       0    0
-compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl        base                  1923   25       0    3
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl        base                  1923   25       0    8
 compiler\ssair\EscapeAnalysis\disjoint_set.jl          base                   144    0       0    0
 compiler\ssair\EscapeAnalysis\interprocedural.jl       base                   160    2       0    0
 docs\Docs.jl                                           base                   659    8       2    2
@@ -247,7 +247,7 @@ special\log.jl                                         base                   59
 special\rem_pio2.jl                                    base                   297    0       0    0
 special\trig.jl                                        base                  1301    0       0    0
 strings\basic.jl                                       base                   831    8       4    0
-strings\io.jl                                          base                   767   12       0    0
+strings\io.jl                                          base                   767   12       0    1
 strings\lazy.jl                                        base                   102    1       0    0
 strings\search.jl                                      base                   727    9       7    0
 strings\string.jl                                      base                   572    5       3    0
@@ -272,7 +272,7 @@ LinearAlgebra\src\factorization.jl                     numeric-linalg         20
 LinearAlgebra\src\generic.jl                           numeric-linalg        1891   23       1    0
 LinearAlgebra\src\givens.jl                            numeric-linalg         431    8       0    0
 LinearAlgebra\src\hessenberg.jl                        numeric-linalg         610    8       0    0
-LinearAlgebra\src\lapack.jl                            numeric-linalg        6945   75       0   93
+LinearAlgebra\src\lapack.jl                            numeric-linalg        6945   75       0   95
 LinearAlgebra\src\lbt.jl                               numeric-linalg         315    3       0    0
 LinearAlgebra\src\ldlt.jl                              numeric-linalg         225    2       0    0
 LinearAlgebra\src\lq.jl                                numeric-linalg         204    0       0    0
@@ -324,14 +324,14 @@ Dates\src\arithmetic.jl                                datetime               10
 Dates\src\conversions.jl                               datetime               131    0       0    0
 Dates\src\deprecated.jl                                datetime                71    1       0    0
 Dates\src\io.jl                                        datetime               732    7       0    0
-Dates\src\parse.jl                                     datetime               329    3       0    0
+Dates\src\parse.jl                                     datetime               329    3       0    2
 Dates\src\periods.jl                                   datetime               468    5       0    0
 Dates\src\query.jl                                     datetime               666    1       0    0
 Dates\src\ranges.jl                                    datetime                74    1       1    0
 Dates\src\rounding.jl                                  datetime               297    0       0    0
 Dates\src\types.jl                                     datetime               475    3       0   16
 Random\src\DSFMT.jl                                    random                 270    2       0    0
-Random\src\RNGs.jl                                     random                 808   10       1    0
+Random\src\RNGs.jl                                     random                 808   10       1    1
 Random\src\Random.jl                                   random                 439    2       1    0
 Random\src\Xoshiro.jl                                  random                 246    0       0    0
 Random\src\XoshiroSimd.jl                              random                 310    4       3    0
@@ -344,8 +344,8 @@ Sockets\src\PipeServer.jl                              networking             10
 Sockets\src\Sockets.jl                                 networking             854    2       2    1
 Sockets\src\addrinfo.jl                                networking             364    2       0    2
 Serialization\src\Serialization.jl                     serialization         1603   17       1    1
-Unicode\src\Unicode.jl                                 text                   343    2       0    0
-Logging\src\ConsoleLogger.jl                           diagnostics            181    2       0    0
+Unicode\src\Unicode.jl                                 text                   343    2       0    2
+Logging\src\ConsoleLogger.jl                           diagnostics            181    2       0    2
 Logging\src\Logging.jl                                 diagnostics             98    0       0    0
 REPL\src\LineEdit.jl                                   tooling-repl          2779   29       7    2
 REPL\src\REPL.jl                                       tooling-repl          1512   13       6    2
@@ -355,7 +355,7 @@ REPL\src\docview.jl                                    tooling-repl           85
 REPL\src\emoji_symbols.jl                              tooling-repl          1232    0       0    0
 REPL\src\latex_symbols.jl                              tooling-repl          2671    0       0    0
 REPL\src\options.jl                                    tooling-repl            62    0       0    0
-REPL\src\TerminalMenus\AbstractMenu.jl                 tooling-repl           417    1       0    0
+REPL\src\TerminalMenus\AbstractMenu.jl                 tooling-repl           417    1       0    2
 REPL\src\TerminalMenus\MultiSelectMenu.jl              tooling-repl           143    1       0    0
 REPL\src\TerminalMenus\Pager.jl                        tooling-repl            43    0       0    0
 REPL\src\TerminalMenus\RadioMenu.jl                    tooling-repl           109    0       0    0
@@ -373,23 +373,54 @@ Total loop sites (functions with >=1 while/for): 1809
 Single-top-level-while functions: 254
 Single-top-level-for functions: 697
 Loop-site shape breakdown: Dict(:single_while => 254, :mixed => 66, :single_for => 697, :multi_while => 20, :has_for => 772)
-Record-shaped candidate positions: 160
-Gate-faithful qualification: qualified=1 declined=159 error=0
+Record-shaped candidate positions: 247
+Gate-faithful qualification: qualified=1 declined=246 error=0
 
 === Record-shaped candidate detail ===
+abstractarray.jl :: copyto! var=inds type=LinearIndices kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+abstractarray.jl :: copyto! var=inds type=LinearIndices kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 abstractarray.jl :: map_n! var=idxs1 type=LinearIndices kind=record_other -> declined (no candidate accumulator qualified)
+abstractarray.jl :: hash var=key_to_linear type=LinearIndices kind=record_other -> declined (no candidate accumulator qualified)
+arrayshow.jl :: _show_nd var=Is type=CartesianIndices kind=record_other -> declined (no candidate accumulator qualified)
 bitarray.jl :: gen_bitarray var=B type=BitArray kind=record_other -> declined (for-loop variable is not a plain symbol)
 bitarray.jl :: splice! var=Bins type=BitVector kind=record_other -> declined (expected exactly one top-level while/for loop)
+bitarray.jl :: hcat var=M type=BitMatrix kind=record_other -> declined (expected exactly one top-level while/for loop)
+bitarray.jl :: vcat var=B type=BitVector kind=record_other -> declined (expected exactly one top-level while/for loop)
+bitarray.jl :: hcat var=B type=BitMatrix kind=record_other -> declined (expected exactly one top-level while/for loop)
+bitarray.jl :: vcat var=B type=BitMatrix kind=record_other -> declined (expected exactly one top-level while/for loop)
 c.jl :: transcode var=buf type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+cartesian.jl :: _nloops var=ex type=Expr kind=record_other -> declined (expected exactly one top-level while/for loop)
 file.jl :: pwd var=sz type=RefValue kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 file.jl :: tempdir var=sz type=RefValue kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 intfuncs.jl :: binomial var=rr type=T kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 io.jl :: readuntil var=out type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+loading.jl :: explicit_manifest_entry_path var=hash type=SHA1 kind=record_other -> declined (no candidate accumulator qualified)
 loading.jl :: parse_image_targets var=io type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+logging.jl :: handle_message var=buf type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)
+logging.jl :: handle_message var=iob type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+logging.jl :: handle_message var=buf type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)
+logging.jl :: handle_message var=iob type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+missing.jl :: _mapreduce var=inds type=LinearIndices kind=record_other -> declined (expected exactly one top-level while/for loop)
+missing.jl :: _mapreduce var=inds type=LinearIndices kind=record_other -> declined (expected exactly one top-level while/for loop)
 mpfr.jl :: string_mpfr var=pc type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 path.jl :: homedir var=sz type=RefValue kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+shell.jl :: shell_parse var=s type=SubString kind=record_other -> declined (expected exactly one top-level while/for loop)
+shell.jl :: shell_parse var=s type=SubString kind=record_other -> declined (expected exactly one top-level while/for loop)
+shell.jl :: shell_parse var=ex type=Expr kind=record_other -> declined (expected exactly one top-level while/for loop)
 show.jl :: show var=recur_io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: show var=recur_io_k type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: show var=recur_io_v type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: show var=recur_io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: show_typealias var=io type=IOContext kind=record_strong -> declined (expected exactly one top-level while/for loop)
+show.jl :: show_typealias var=io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: make_wheres var=seen type=IdSet kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: make_wheres var=seen type=IdSet kind=record_other -> declined (expected exactly one top-level while/for loop)
 show.jl :: show_wheres var=io type=IOContext kind=record_strong -> declined (no candidate accumulator found in pre-loop statements)
+show.jl :: show_tuple_as_call var=io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: show_tuple_as_call var=io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
+show.jl :: type_depth_limit var=output type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)
+stacktraces.jl :: stacktrace var=stack type=StackTrace kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+stat.jl :: filemode_string var=str type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 summarysize.jl :: summarysize var=ss type=SummarySize kind=record_other -> declined (no candidate accumulator qualified)
 sysinfo.jl :: cpu_info var=UVcpus type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 sysinfo.jl :: cpu_info var=count type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
@@ -400,19 +431,64 @@ JuliaSyntax\src\parse_stream.jl :: validate_tokens var=charbuf type=IOBuffer kin
 JuliaSyntax\src\parser.jl :: parse_array var=array_order type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 JuliaSyntax\src\parser_api.jl :: tokenize var=ps type=ParseStream kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 JuliaSyntax\test\benchmark.jl :: concat_base var=io type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+JuliaSyntax\test\fuzz_test.jl :: delete_tokens var=io type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)
 JuliaSyntax\test\test_utils.jl :: parse_sexpr var=st type=ParseStream kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\abstractinterpretation.jl :: abstract_apply var=retinfo type=UnionSplitApplyCallInfo kind=record_other -> declined (expected exactly one top-level while/for loop)
 compiler\inferencestate.jl :: InferenceState var=method_info type=MethodInfo kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\typeinfer.jl :: _typeinf var=valid_worlds type=WorldRange kind=record_weak -> declined (expected exactly one top-level while/for loop)
+compiler\typeinfer.jl :: _typeinf var=valid_worlds type=WorldRange kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\typeinfer.jl :: _typeinf var=valid_worlds type=WorldRange kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\typeinfer.jl :: _typeinf var=valid_worlds type=WorldRange kind=record_other -> declined (expected exactly one top-level while/for loop)
 compiler\utilities.jl :: count_const_size var=dtfd type=DataTypeFieldDesc kind=record_other -> declined (no candidate accumulator qualified)
 compiler\ssair\inlining.jl :: fix_va_argexprs! var=tuple_call type=Expr kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\inlining.jl :: ir_inline_unionsplit! var=pn type=PhiNode kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\inlining.jl :: batch_inline! var=state type=CFGInliningState kind=record_other -> declined (for-loop variable is not a plain symbol)
 compiler\ssair\ir.jl :: complete var=cfg type=CFG kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 compiler\ssair\ir.jl :: compact! var=compact type=IncrementalCompact kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\irinterp.jl :: _ir_abstract_constant_propagation var=bb_ip type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\irinterp.jl :: _ir_abstract_constant_propagation var=bb_ip type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
 compiler\ssair\passes.jl :: lift_leaves var=lifted_leaves type=LiftedLeaves kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\passes.jl :: sroa_pass! var=compact type=IncrementalCompact kind=record_other -> declined (for-loop variable is not a plain symbol)
+compiler\ssair\passes.jl :: sroa_pass! var=lazydomtree type=LazyDomtree kind=record_other -> declined (for-loop variable is not a plain symbol)
 compiler\ssair\passes.jl :: try_inline_finalizer! var=et type=InliningEdgeTracker kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\passes.jl :: sroa_mutables! var=lazypostdomtree type=LazyPostDomtree kind=record_other -> declined (for-loop variable is not a plain symbol)
+compiler\ssair\passes.jl :: form_new_preserves var=newex type=Expr kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: form_new_preserves var=newex type=Expr kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: form_new_preserves var=newex type=Expr kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: adce_pass! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=worklist type=BitSetBoundedMinPrioritySet kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\passes.jl :: cfg_simplify! var=compact type=IncrementalCompact kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\show.jl :: show_ir var=compact_cfg type=CFG kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\slot2ssa.jl :: iterated_dominance_frontier var=heap_order type=By kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\slot2ssa.jl :: domsort_ssa! var=result type=InstructionStream kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\slot2ssa.jl :: domsort_ssa! var=result type=InstructionStream kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\slot2ssa.jl :: domsort_ssa! var=result type=InstructionStream kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\slot2ssa.jl :: domsort_ssa! var=cfg type=CFG kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\slot2ssa.jl :: domsort_ssa! var=new_new_nodes type=NewNodeStream kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: analyze_escapes var=estate type=EscapeState kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: analyze_escapes var=changes type=Changes kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: analyze_escapes var=astate type=AnalysisState kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: add_thrown_escapes! var=info type=ThrownEscape kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: add_fallback_changes! var=info type=ThrownEscape kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: escape_edges! var=ret type=SSAValue kind=record_other -> declined (no candidate accumulator qualified)
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: escape_invoke! var=ret type=SSAValue kind=record_other -> declined (expected exactly one top-level while/for loop)
+compiler\ssair\EscapeAnalysis\EscapeAnalysis.jl :: escape_invoke! var=ret type=SSAValue kind=record_other -> declined (expected exactly one top-level while/for loop)
 docs\Docs.jl :: multidoc var=out type=Expr kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 docs\Docs.jl :: multidoc var=ref type=RefValue kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+strings\io.jl :: string_with_env var=env_io type=IOContext kind=record_other -> declined (expected exactly one top-level while/for loop)
 strings\unicode.jl :: titlecase var=state type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 strings\unicode.jl :: titlecase var=b type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 strings\unicode.jl :: length var=state type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
@@ -426,6 +502,8 @@ LinearAlgebra\src\lapack.jl :: geqrf! var=info type=Ref kind=record_other -> dec
 LinearAlgebra\src\lapack.jl :: gerqf! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\lapack.jl :: tzrzf! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\lapack.jl :: ormrz! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+LinearAlgebra\src\lapack.jl :: gels! var=info type=Ref kind=record_other -> declined (expected exactly one top-level while/for loop)
+LinearAlgebra\src\lapack.jl :: gels! var=info type=Ref kind=record_other -> declined (expected exactly one top-level while/for loop)
 LinearAlgebra\src\lapack.jl :: getri! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\lapack.jl :: gelsd! var=rnk type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\lapack.jl :: gelsd! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
@@ -512,6 +590,8 @@ LinearAlgebra\src\lapack.jl :: trsen! var=s type=Ref kind=record_other -> declin
 LinearAlgebra\src\lapack.jl :: trsen! var=sep type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\lapack.jl :: tgsen! var=info type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 LinearAlgebra\src\uniformscaling.jl :: unknown var=v type=T kind=record_other -> declined (expected exactly one top-level while/for loop)
+Dates\src\parse.jl :: tryparsenext_core var=value_defaults type=Tuple kind=record_other -> declined (expected exactly one top-level while/for loop)
+Dates\src\parse.jl :: tryparsenext_core var=value_defaults type=Tuple kind=record_other -> declined (expected exactly one top-level while/for loop)
 Dates\src\types.jl :: DateTime var=y type=Year kind=record_other -> declined (expected exactly one top-level while/for loop)
 Dates\src\types.jl :: DateTime var=m type=Month kind=record_other -> declined (expected exactly one top-level while/for loop)
 Dates\src\types.jl :: DateTime var=d type=Day kind=record_other -> declined (expected exactly one top-level while/for loop)
@@ -528,12 +608,19 @@ Dates\src\types.jl :: Time var=s type=Second kind=record_other -> declined (expe
 Dates\src\types.jl :: Time var=ms type=Millisecond kind=record_other -> declined (expected exactly one top-level while/for loop)
 Dates\src\types.jl :: Time var=us type=Microsecond kind=record_other -> declined (expected exactly one top-level while/for loop)
 Dates\src\types.jl :: Time var=ns type=Nanosecond kind=record_other -> declined (expected exactly one top-level while/for loop)
+Random\src\RNGs.jl :: rand! var=region type=LinearIndices kind=record_other -> declined (expected exactly one top-level while/for loop)
 Sockets\src\Sockets.jl :: listenany var=addr type=InetAddr kind=record_strong -> qualified ()
 Sockets\src\addrinfo.jl :: getipaddrs var=addr_ref type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 Sockets\src\addrinfo.jl :: getipaddrs var=count_ref type=Ref kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 Serialization\src\Serialization.jl :: deserialize_dict var=t type=T kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+Unicode\src\Unicode.jl :: graphemes var=state type=Ref kind=record_other -> declined (expected exactly one top-level while/for loop)
+Unicode\src\Unicode.jl :: graphemes var=state type=Ref kind=record_other -> declined (expected exactly one top-level while/for loop)
+Logging\src\ConsoleLogger.jl :: handle_message var=buf type=IOBuffer kind=record_other -> declined (for-loop variable is not a plain symbol)
+Logging\src\ConsoleLogger.jl :: handle_message var=iob type=IOContext kind=record_other -> declined (for-loop variable is not a plain symbol)
 REPL\src\LineEdit.jl :: normalize_key var=buf type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 REPL\src\LineEdit.jl :: init_state var=s type=MIState kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
 REPL\src\REPL.jl :: run_frontend var=d type=REPLDisplay kind=record_other -> declined (no candidate accumulator qualified)
 REPL\src\REPL.jl :: run_frontend var=d type=REPLDisplay kind=record_other -> declined (no candidate accumulator qualified)
 REPL\src\docview.jl :: formatdoc var=buffer type=IOBuffer kind=record_other -> declined (no candidate accumulator found in pre-loop statements)
+REPL\src\TerminalMenus\AbstractMenu.jl :: printmenu var=buf type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)
+REPL\src\TerminalMenus\AbstractMenu.jl :: printmenu var=buf type=IOBuffer kind=record_other -> declined (expected exactly one top-level while/for loop)

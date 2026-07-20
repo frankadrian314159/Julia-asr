@@ -151,14 +151,7 @@ function analyze_function(fdef)
         # Exactly one `for` loop, at the top level, and nothing else
         # loop-shaped anywhere in the function (no nested for, no
         # while) - the `for`-loop analog of `:single_while`, scanned
-        # the same way. AsrTransform doesn't support `for` loops yet
-        # (this is a Pass-1-only exploration, gated to zero at Pass 2
-        # until/unless that support exists), but Pass 1's own record-
-        # accumulator shape check is loop-shape-agnostic
-        # (`classify_candidates` only looks at pre_stmts/loop_stmts,
-        # never at the loop header itself), so scanning costs nothing
-        # extra to answer "how many are there" before investing in
-        # actual qualification/rewrite support.
+        # the same way (v1.7 - AsrTransform now supports both).
         shape = :single_for
         loop_idx = findfirst(s -> Meta.isexpr(s, :for), stmts)
         pre_stmts = stmts[1:loop_idx-1]
@@ -168,19 +161,46 @@ function analyze_function(fdef)
         accum_kind = isempty(candidates) ? :none : candidates[1].kind
     elseif n_while >= 2 && n_for == 0
         shape = :multi_while
-        candidates = RecordCandidate[]
-        accum_kind = :none
+        candidates = scan_all_top_level_loops(stmts)
+        accum_kind = isempty(candidates) ? :none : candidates[1].kind
     elseif n_while == 0 && n_for > 0
         shape = :has_for
-        candidates = RecordCandidate[]
-        accum_kind = :none
+        candidates = scan_all_top_level_loops(stmts)
+        accum_kind = isempty(candidates) ? :none : candidates[1].kind
     else
         shape = :mixed
-        candidates = RecordCandidate[]
-        accum_kind = :none
+        candidates = scan_all_top_level_loops(stmts)
+        accum_kind = isempty(candidates) ? :none : candidates[1].kind
     end
 
     return LoopSite(fname, shape, n_while, n_for, accum_kind, candidates)
+end
+
+"""Exploratory-only scan (v1.7, "would multi-loop support help"): unlike
+`:single_while`/`:single_for`, these shapes (multiple top-level loops,
+or a `while`/`for` mix) have no one unambiguous "the loop" - real
+qualification would need to decide which loop, if any, actually owns a
+given accumulator (`AsrTransform` has no such path; every candidate
+found here still declines at Pass 2 with "expected exactly one
+top-level while/for loop"). This scans EVERY TOP-LEVEL while/for
+independently, treating each one's own preceding statements as its own
+`pre_stmts` - a rough approximation for a second-or-later top-level
+loop (whose `pre_stmts` then also include the prior loop's own body),
+fine for a raw candidate-count proxy answering "is there anything here
+worth building real multi-loop support for," not a real qualification
+path. Does NOT look inside nested loops (a `for` inside another `for`
+or an `if`) - genuinely out of scope for this quick a look; any nested-
+loop candidates are undercounted, not zero."""
+function scan_all_top_level_loops(stmts)
+    out = RecordCandidate[]
+    loop_idxs = findall(s -> Meta.isexpr(s, :while) || Meta.isexpr(s, :for), stmts)
+    for loop_idx in loop_idxs
+        pre_stmts = stmts[1:loop_idx-1]
+        loopbody = stmts[loop_idx].args[2]
+        loop_stmts = Meta.isexpr(loopbody, :block) ? strip_linenums(loopbody.args) : Any[loopbody]
+        append!(out, classify_candidates(pre_stmts, loop_stmts))
+    end
+    return out
 end
 
 function count_for_anywhere(term)

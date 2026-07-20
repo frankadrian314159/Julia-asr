@@ -593,6 +593,20 @@ ambiguous_probe(tag::String, q::Point) = length(tag) + q.x + q.y
 # this fix.
 parametric_probe(tag::Vector{T}, q::Point) where {T} = length(tag) + q.x + q.y
 
+# v1.8: a genuine TWO-level pass-through chain - probe_level1 passes
+# the accumulator bare into probe_level2, which itself only reads
+# fields. v1.6's original one-level cap declined this (it hard-stopped
+# after checking probe_level1's own body); v1.8's depth-bounded
+# recursive summary check should now resolve it.
+probe_level2(q::Point) = q.x + q.y
+probe_level1(tag::Int, q::Point) = tag + probe_level2(q)
+
+# v1.8 negative case: a genuinely CYCLIC pass-through chain (cycle_a
+# calls cycle_b calls cycle_a) must resolve to unsafe via the
+# :computing cache sentinel, not infinite-loop or crash.
+cycle_b(q::Point) = q.x + cycle_a(1, q)
+cycle_a(tag::Int, q::Point) = tag + cycle_b(q)
+
 function decline_unchanged(ex, mod)
     new_ex = try
         AsrTransform.rewrite_function(ex, mod)
@@ -1085,6 +1099,82 @@ end
             i = 0
             while i < n
                 if ambiguous_probe(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.8: two-level pass-through chain qualifies" begin
+        # probe_level1(1, p) passes p bare into probe_level2, which
+        # only reads fields - v1.6's original one-level cap declined
+        # this (it never looked past probe_level1's own body); v1.8's
+        # depth-bounded recursive summary check should resolve it.
+        @asr function probe_chain_qualifies(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if probe_level1(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        function probe_chain_plain(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if probe_level1(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end
+        @test probe_chain_plain(1000) == probe_chain_qualifies(1000)
+
+        # Structural check, not just output equality: output equality
+        # alone can't distinguish "genuinely scalarized" from "declined
+        # and fell back to the untouched original" (both produce
+        # identical results) - confirm the rewritten Expr actually
+        # scalarized p and re-boxed it at the probe_level1 call site.
+        ex = :(function f(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if probe_level1(1, p) > 1.0e18
+                    error("unreachable")
+                end
+                p = Point(p.x + 1.0, p.y + 2.0)
+                i += 1
+            end
+            return p.x + p.y
+        end)
+        new_ex = AsrTransform.rewrite_function(ex, @__MODULE__)
+        new_body_stmts = AsrTransform.strip_linenums(new_ex.args[2].args)
+        loop_stmt = only(filter(s -> s isa Expr && s.head == :while, new_body_stmts))
+        loop_body_str = string(loop_stmt.args[2])
+        @test occursin("probe_level1(1, Point(p_x, p_y))", loop_body_str)
+        @test occursin("__asr_tmp_", loop_body_str)
+    end
+
+    @testset "v1.8: cyclic pass-through chain declines, not infinite loop" begin
+        # cycle_a calls cycle_b calls cycle_a, both passing the
+        # accumulator bare - the :computing cache sentinel must resolve
+        # this to unsafe (declines) rather than recursing forever or
+        # erroring.
+        ex = :(function f(n)
+            p = Point(0.0, 0.0)
+            i = 0
+            while i < n
+                if cycle_a(1, p) > 1.0e18
                     error("unreachable")
                 end
                 p = Point(p.x + 1.0, p.y + 2.0)
