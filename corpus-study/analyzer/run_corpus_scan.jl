@@ -57,10 +57,11 @@ function scan_group(files, domain, resolve_mod::Module, root_for_relpath)
         loc = r.loc
         if !r.ok
             push!(rows, (path=relpath(path, root_for_relpath), domain=domain, status=:error, loc=loc,
-                         n_loop_sites=0, n_single_while=0, shapes=Dict{Symbol,Int}(), hits=Any[]))
+                         n_loop_sites=0, n_single_while=0, n_single_for=0, shapes=Dict{Symbol,Int}(), hits=Any[]))
             continue
         end
         n_single_while = count(s -> s.shape == :single_while, r.loop_sites)
+        n_single_for = count(s -> s.shape == :single_for, r.loop_sites)
         shapes = Dict{Symbol,Int}()
         for s in r.loop_sites
             shapes[s.shape] = get(shapes, s.shape, 0) + 1
@@ -75,7 +76,8 @@ function scan_group(files, domain, resolve_mod::Module, root_for_relpath)
             end
         end
         push!(rows, (path=relpath(path, root_for_relpath), domain=domain, status=:ok, loc=loc,
-                     n_loop_sites=length(r.loop_sites), n_single_while=n_single_while, shapes=shapes, hits=hits))
+                     n_loop_sites=length(r.loop_sites), n_single_while=n_single_while, n_single_for=n_single_for,
+                     shapes=shapes, hits=hits))
     end
     return rows
 end
@@ -98,6 +100,7 @@ function main()
     total_loc = sum(r.loc for r in all_rows)
     total_loop_sites = sum(r.n_loop_sites for r in all_rows)
     total_single_while = sum(r.n_single_while for r in all_rows)
+    total_single_for = sum(r.n_single_for for r in all_rows)
     all_hits = Any[]
     for r in all_rows
         for h in r.hits
@@ -130,6 +133,7 @@ function main()
     println("Total LOC: $total_loc")
     println("Total loop sites (functions with >=1 while/for): $total_loop_sites")
     println("Single-top-level-while functions: $total_single_while")
+    println("Single-top-level-for functions: $total_single_for")
     println("Loop-site shape breakdown: ", shape_totals)
     println("Record-shaped candidate positions: $(length(all_hits))")
     println("Gate-faithful qualification: qualified=$n_qualified declined=$n_declined error=$n_error")

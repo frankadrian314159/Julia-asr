@@ -10,7 +10,7 @@ corpus study (`../../FOL/fol/docs/cgo2027/corpus-study/`),
 upper-bound proxy) followed by a gate-faithful Pass 2 that runs the
 *real* `AsrTransform.rewrite_function` as a black-box oracle - the same
 entry point `@asr` itself calls, never a re-implementation that could
-drift from the actual v1–v1.5 rules.
+drift from the actual v1–v1.7 rules.
 
 **Update (v1.4)**: this study's own finding - parametric structs were
 the single largest exclusion in real code (10 of 15 hits) - was fed
@@ -92,6 +92,67 @@ gate-faithful oracle and by actually running the rewritten function
 (including its retry-on-taken-port path, which exercises more than one
 loop iteration) side by side with the baseline. **The corpus study now
 shows 1 of 15 candidates qualifying.**
+
+**Update (v1.7)**: a fundamentally different question than v1.4-v1.6's
+narrow shape-recognition fixes - not "is this specific blocked case
+actually safe," but "how much of the corpus was never even LOOKED at."
+Pass 1's own record-accumulator scan (`classify_candidates`) had only
+ever been wired up for `:single_while` sites; for every other shape
+(`:has_for`, `:multi_while`, `:mixed` - 86% of the corpus's 1,809
+loop-bearing functions) `candidates` was a hardcoded empty list, because
+`@asr` only ever accepted `while` loops. Given the study's own headline
+finding #1 (81% of all loop sites are `for`-shaped, only 14% are the
+`while`-only shape `@asr` could even consider), this meant the vast
+majority of Julia's own idiomatic loop-carried-state code had never
+been checked for this shape at all - not declined, never scanned.
+Extending Pass 1 to also scan `:single_for` sites (a `for`-loop analog
+of `:single_while` - exactly one `for` loop, at the top level, nothing
+else loop-shaped in the function) cost nothing extra, since
+`classify_candidates` only ever looks at `pre_stmts`/`loop_stmts`, never
+the loop header: **260 record-shaped candidates, up from 15** (245 new,
+all in `for`-loop bodies). Two of those 245 turned out to be more Pass-1
+false positives, same category as before - `BlasInt` (a LinearAlgebra
+type ALIAS for `Int64`/`Int32`, `isstructtype(BlasInt) == false`, not a
+struct at all) and `Matrix` (a Base collection type, same category as
+the already-excluded `Vector`/`Array`) together accounted for 100 of the
+245, both now excluded the same way `T`/`UInt64` were before, bringing
+the honest count to **160 total candidates**.
+
+`AsrTransform.jl` itself then gained real `for`-loop support
+(`locate_loop` - see `README.md`'s Status table): `while`'s `cond` and
+`for`'s `iterexpr` are treated identically (field-read-only checked,
+substituted, spliced back into whichever loop head shape it came from),
+and every OTHER mechanism - branch-shaped reconstruction, inlining,
+opaque-call passthrough, multi-accumulator - needed zero code changes,
+since none of them ever look at the loop header, confirmed by a
+dedicated test composing v1.2's branch-shaped reconstruction inside a
+`for` loop. One genuinely new hazard `while` never has: a `for`-loop's
+own iteration variable can shadow the accumulator's name (`for p in
+items` where `p` is also the accumulator) - declined per-candidate
+rather than risk misattributing loop-variable references as accumulator
+ones.
+
+**Re-running the corpus study with real qualification (not just Pass-1
+scanning) still shows only 1 of 160 candidates qualifying** -
+`Sockets.listenany`, unaffected, since it was already `:single_while`.
+This is not a null result in the uninteresting sense: it's the SAME
+dominant real-code pattern found in the `while` set (mutable/
+reference-semantics helper objects, not reconstructed records)
+recurring at much larger scale in the `for` set, now with real numbers
+behind it rather than an inference from 15 examples. `Ref`/`RefValue`
+alone account for 102 of 130 "no candidate accumulator found in
+pre-loop statements" declines - and `Ref` is a structurally different,
+even MORE fundamental mismatch than "mutable struct": `Ref` is an
+ABSTRACT type (`isabstracttype(Ref) == true`), so `try_accumulator_stmt`
+never even gets past `isstructtype` - and its mutation idiom is
+`x[] = ...`/`x[] += ...` (`getindex`/`setindex!`), not `.field = ...`,
+so mutable-struct support (the other deferred extension) wouldn't
+directly cover it either. The remaining declines are the same
+categories already documented below (`IOBuffer`/`IOContext` print
+builders, a handful more Pass-1 false positives like `T`/`Expr`/
+`SSAValue` from macro-heavy compiler-internals code, and 20 cases where
+`GateCheck`'s simple name-based function lookup found a different
+same-named method than Pass 1 scanned).
 
 **A real methodological difference from the sibling studies, not just a
 smaller number**: Erlang/OTP and the Python package ecosystem are both
@@ -192,38 +253,51 @@ Raw output from the run this report is based on is saved at
 Files scanned OK: 365 / 365
 Total LOC: 272,688
 Total loop sites (functions with >=1 while/for): 1,809
-Loop-site shape breakdown: single_while=254  has_for=1,469  mixed=66  multi_while=20
-Record-shaped candidate positions: 15
-Gate-faithful qualification: qualified=1  declined=14  error=0
+Loop-site shape breakdown: single_while=254  single_for=697  has_for=772  mixed=66  multi_while=20
+Record-shaped candidate positions: 160
+Gate-faithful qualification: qualified=1  declined=159  error=0
 ```
 
 **Headline finding #1, before the record-shape question is even
 reached: `for` loops overwhelmingly dominate Julia's own idiomatic
-style.** Of 1,809 loop-bearing functions, only 254 (14.0%) are even the
-*right loop shape* (`single_while`, no `for`) for `@asr` to consider at
-all - 1,469 (81.2%) use `for` exclusively, with a further 86 (4.8%)
-mixing `for` with `while` or using multiple `while` loops. This is a
-structural, language-level finding distinct from anything the BEAM or
-Python studies surfaced (Erlang has no `for`; Python's `while`/`for`
-split is far less lopsided) - `for` loops as an alternative loop shape
-is already on Julia-asr's own deferred list, but this measures *how
-much* of the corpus that gap alone accounts for, before any other
-qualification question matters.
+style.** Of 1,809 loop-bearing functions, only 254 (14.0%) are the
+*right loop shape for `while`-only ASR* (`single_while`) - but 697
+(38.5%) are the `for`-loop analog (`single_for`, exactly one top-level
+`for`, nothing else loop-shaped), with a further 772 (42.7%) using
+`for` in a more complex shape (nested, multiple, or mixed with `while`)
+and 86 (4.8%) mixed/multi-`while`. `single_while + single_for` together
+- 951 functions, 52.6% of the corpus - is the realistic ASR-addressable
+ceiling as of v1.7; the remaining 858 (`has_for`'s complex cases plus
+`mixed`/`multi_while`) are out of scope for a different, structural
+reason (more than one loop, unclear which owns the accumulator) than
+"wrong loop keyword," and remain deferred.
 
-**Headline finding #2: even restricted to the 254 in-scope
-`single_while` functions, a syntactically record-accumulator-shaped
-pre-loop init occurs in only 15 positions (5.9% of in-scope functions,
-0.83% of all loop sites) - 14 of which decline, every one for a reason
-already documented as a deliberate v1-v1.3 exclusion, not a new gap,
-and one of which (`Sockets.listenany`) now qualifies as of v1.6.**
+**Headline finding #2: restricted to the 951 in-scope `single_while`/
+`single_for` functions, a syntactically record-accumulator-shaped
+pre-loop init occurs in 160 positions (16.8% of in-scope functions,
+8.8% of all loop sites) - 159 of which decline, and one of which
+(`Sockets.listenany`) qualifies. The overwhelming majority of the 159
+(130, dominated by `Ref`/`RefValue` at 102) hit the same real-code
+pattern already documented for the `while`-only set: Julia code needing
+loop-carried state overwhelmingly reaches for a mutable or
+reference-semantics helper object, not a record rebuilt via a fresh
+constructor call each iteration - now confirmed at 10x the original
+sample size, not just inferred from 15 examples.**
 
-### Why all 15 decline: two already-documented walls account for 13
+### Why the original 15 (`single_while` only) decline: two already-documented walls account for 13
 
-Every hit was read directly and re-run against `GateCheck.qualifies`
-(never inferred from the tool's own decline message alone) to confirm
-the actual cause, following up in each type's own defining module when
-the corpus's own module-resolution choice wasn't the right one to
-check in:
+The table below is the original, hand-audited `single_while`-only set
+(15 candidates, pre-v1.7) - every hit read directly and re-run against
+`GateCheck.qualifies` (never inferred from the tool's own decline
+message alone), following up in each type's own defining module when
+the corpus's own module-resolution choice wasn't the right one to check
+in. The 245 additional `for`-loop candidates v1.7 found are NOT
+individually tabulated here (160 total candidates is too many for the
+same one-by-one hand audit) - see the "Update (v1.7)" section above for
+their own characterization by type-name frequency instead, which shows
+the same two dominant categories (`Ref`-style reference-semantics
+objects, structurally distinct from "mutable struct" but the same
+underlying "not a reconstructed record" story) at much larger scale:
 
 | Category | Count | Sites | Reason | Status |
 |---|---|---|---|---|
@@ -285,11 +359,17 @@ independent of whether `@asr` could handle it.
   primitives) - a broader package corpus, especially domain code
   translated more directly from a functional/immutable style (physics
   simulations, parsers, ASTs), might show a different balance. Treat
-  the 0.83%-shaped / 1-of-15-qualifying numbers as this corpus's own
+  the 8.8%-shaped / 1-of-160-qualifying numbers as this corpus's own
   honest data point, not a claim about "Julia code in general."
-- **15 hits is a small enough number that this study reads every one**
-  (unlike BEAM-asr/cpython-asr's own sampling of a `record_weak`
-  subset) - there's no "lower bound, not measured" caveat needed here.
+- **The original 15 `single_while` hits were each read by hand; the
+  245 additional `for`-loop hits (v1.7) were characterized by type-name
+  frequency instead** - 160 is too many for the same one-by-one audit
+  the original 15 got. The categorization is still grounded (every
+  frequency count comes from the real Pass-2 oracle's own output, and
+  the dominant `Ref`/`BlasInt`/`Matrix` categories were each verified
+  directly - `isabstracttype(Ref)`, `isstructtype(BlasInt)`, etc. - not
+  just inferred from the type name), but is coarser than the original
+  table.
 - **The gate-faithful Pass 2 oracle is exactly the shipped
   `AsrTransform.jl`**, so its own known scope boundaries apply
   unchanged: interprocedural inlining, branch-shaped reconstruction,

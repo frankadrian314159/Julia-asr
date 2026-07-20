@@ -283,6 +283,35 @@ end
     return p.x + p.y
 end
 
+# v1.7 composition check: branch-shaped reconstruction (v1.2) inside a
+# `for` loop rather than `while` - confirms classify_branch_tree and
+# friends are genuinely loop-shape-agnostic (they only ever look at
+# loop_stmts, never the loop header), not just coincidentally untested
+# against `for`.
+function plain_branch_for(n)
+    p = Bounce(0.0, 0.0)
+    for i in 1:n
+        if p.x > 100.0
+            p = Bounce(0.0, p.y)
+        else
+            p = Bounce(p.x + 1.0, p.y + 0.5)
+        end
+    end
+    return p.x + p.y
+end
+
+@asr function asr_branch_for(n)
+    p = Bounce(0.0, 0.0)
+    for i in 1:n
+        if p.x > 100.0
+            p = Bounce(0.0, p.y)
+        else
+            p = Bounce(p.x + 1.0, p.y + 0.5)
+        end
+    end
+    return p.x + p.y
+end
+
 # Multi-accumulator (v1.3): more than one accumulator threaded through
 # the same loop simultaneously.
 
@@ -407,6 +436,28 @@ end
     return p.x + p.y
 end
 
+# v1.7: a `for`-loop-shaped accumulator - direct reconstruction inside
+# a `for i in range` body rather than `while`. The corpus study found
+# 245 real record-shaped candidates blocked purely by the loop-shape
+# restriction (245 of 260 total candidates, once Pass 1 was extended to
+# actually look at for-loop bodies - see corpus-study/README.md), so
+# this is the single highest-leverage extension after v1.6.
+function plain_for(n)
+    p = Point(0.0, 0.0)
+    for i in 1:n
+        p = Point(p.x + 1.0, p.y + 2.0)
+    end
+    return p.x + p.y
+end
+
+@asr function asr_for(n)
+    p = Point(0.0, 0.0)
+    for i in 1:n
+        p = Point(p.x + 1.0, p.y + 2.0)
+    end
+    return p.x + p.y
+end
+
 @testset "AsrTransform positive cases" begin
     @test plain_full(1000) == asr_full(1000)
     @test plain_partial(500) == asr_partial(500)
@@ -421,6 +472,8 @@ end
     @test plain_multi_symmetric(1000) == asr_multi_symmetric(1000)
     @test plain_multi_asymmetric(1000) == asr_multi_asymmetric(1000)
     @test plain_paramed(1000) == asr_paramed(1000)
+    @test plain_for(1000) == asr_for(1000)
+    @test plain_branch_for(500) == asr_branch_for(500)
 
     # Structural check: qualification fired iff the rewritten Expr no
     # longer contains a `Point(...)` reconstruction call inside the loop.
@@ -753,6 +806,38 @@ end
             @inbounds while i < n
                 p = Point(p.x + 1.0, p.y)
                 i += 1
+            end
+            return p.x
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.7: for-loop variable shadows the accumulator's own name" begin
+        # `for p in 1:n` rebinds `p` to the LOOP VARIABLE inside the
+        # body - a real hazard `while` never has (it introduces no new
+        # binding at all). Any bare reference to `p` inside the body
+        # would then ambiguously mean the loop variable, not the outer
+        # accumulator, so this candidate must decline rather than
+        # silently misattribute references.
+        ex = :(function f(n)
+            p = Point(0.0, 0.0)
+            for p in 1:n
+                p = Point(1.0, 2.0)
+            end
+            return p
+        end)
+        @test decline_unchanged(ex, @__MODULE__)
+    end
+
+    @testset "v1.7: multi-iterator for-loop header declines" begin
+        # `for i in a, j in b` parses its header as an `Expr(:block,
+        # ...)` of multiple assignments, not the single `Expr(:(=),
+        # var, iterexpr)` v1.7 supports - declines cleanly rather than
+        # misreading the header shape.
+        ex = :(function f(n, m)
+            p = Point(0.0, 0.0)
+            for i in 1:n, j in 1:m
+                p = Point(p.x + 1.0, p.y + 1.0)
             end
             return p.x
         end)

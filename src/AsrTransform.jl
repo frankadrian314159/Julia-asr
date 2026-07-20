@@ -3,7 +3,7 @@ Aggregate Scalar Replacement for Julia.
 
 Per-function macro: `@asr function ... end`.
 
-Given a `while` loop that threads one or more immutable struct
+Given a `while` or `for` loop that threads one or more immutable struct
 accumulators through its own back-edge (each rebound every iteration via
 a positional constructor call, full or partial, directly or through a
 one-level-inlinable helper, or across an if/elseif/else branch tree),
@@ -74,6 +74,39 @@ its own `module X ... end`, which the original flat top-level-only
 (`find_all_function_defs!` - likewise fixes v1.1, not just v1.6). With
 all three gaps closed, `Sockets.listenany` is the corpus study's first
 genuinely qualifying real-world file (`corpus-study/README.md`).
+
+v1.7 adds `for`-loop support (`locate_loop`): the corpus study found
+245 real record-shaped candidates blocked purely by the "no `for`
+loops" restriction once Pass 1 was extended to actually scan `for`-loop
+bodies (previously it only ever populated candidates for `:single_while`
+sites - 86% of all loop-bearing functions in the corpus were never even
+checked). `locate_loop` generalizes loop detection to accept either
+kind, treating `for`'s `iterexpr` (evaluated once, at loop entry) the
+same way `while`'s `cond` always was (field-read-only checked,
+substituted, spliced back into whichever loop head shape it came from)
+- `classify_loop`/`classify_branch_tree`/`try_inline_helper`/
+`verify_safe_passthrough_arg` needed NO changes at all, since none of
+them ever look at the loop header, only `loop_stmts` (confirmed by a
+dedicated test: branch-shaped reconstruction, v1.2, composes correctly
+inside a `for` loop with zero code changes to that mechanism). One new
+hazard `while` never has: a `for`-loop's own iteration variable can
+shadow the accumulator's name (`for p in items` where `p` is also the
+accumulator) - `find_and_classify_accumulators` declines just that one
+candidate rather than risk misattributing loop-variable references as
+accumulator references. Re-running the corpus study with real `for`-loop
+qualification (not just Pass-1 scanning) still shows only 1 of 160
+candidates qualifying (`listenany`, unaffected) - the same dominant
+real-code pattern that blocks most `while`-shaped candidates
+(mutable/reference-semantics objects, not reconstructed records) turns
+out to dominate `for`-shaped ones even more heavily: `Ref`/`RefValue`
+alone account for 102 of the 130 "no candidate found" declines, and
+`Ref` is a structurally different, even more fundamental mismatch than
+"mutable struct" - it's an ABSTRACT type (`isabstracttype(Ref) ==
+true`), not a concrete struct at all, and it mutates via `x[] = ...`
+(`getindex`/`setindex!`), not `.field = ...`, so mutable-struct support
+alone wouldn't cover it either. See `corpus-study/README.md` for the
+full breakdown.
+
 See Julia-asr design notes for the full qualification/rewrite spec
 this module implements.
 
@@ -106,6 +139,48 @@ end
 # Entry point
 # -----------------------------------------------------------------------
 
+"""Locates the function's single top-level loop - `while` (v1) or `for`
+(v1.7) - and splits it into `(loop_kind, loopvar, header, loop_stmts,
+pre_stmts, post_stmts)`. `header` plays the same role for both kinds:
+`while`'s `cond` (checked/substituted every iteration in the ORIGINAL
+semantics) or `for`'s `iterexpr` (evaluated once, at loop entry) - this
+transform treats both identically downstream (field-read-only checked,
+substituted the same way, spliced back into whichever loop head shape
+it came from), since neither one is what drives reconstruction; only
+`loop_stmts` is. `loopvar` is `nothing` for `while`.
+
+v1.7 scope: only a single-iterable `for var in iterexpr` header
+qualifies (`Expr(:(=), var::Symbol, iterexpr)`) - a multi-iterator `for
+i in a, j in b` parses to a `:block` header instead and declines
+cleanly, same "start simple" discipline as every other shape restriction
+in this module."""
+function locate_loop(stmts)
+    loop_idxs = findall(s -> Meta.isexpr(s, :while) || Meta.isexpr(s, :for), stmts)
+    length(loop_idxs) == 1 || throw(AsrDecline("expected exactly one top-level while/for loop"))
+    loop_idx = loop_idxs[1]
+    pre_stmts = stmts[1:loop_idx-1]
+    loop_expr = stmts[loop_idx]
+    post_stmts = stmts[loop_idx+1:end]
+
+    length(loop_expr.args) == 2 || throw(AsrDecline("unexpected loop expr shape"))
+    if loop_expr.head === :while
+        cond, loopbody = loop_expr.args
+        loop_kind, loopvar, header = :while, nothing, cond
+    else
+        for_header, loopbody = loop_expr.args
+        (Meta.isexpr(for_header, :(=)) && length(for_header.args) == 2) ||
+            throw(AsrDecline("unsupported for-loop header shape"))
+        loopvar, iterexpr = for_header.args
+        loopvar isa Symbol || throw(AsrDecline("for-loop variable is not a plain symbol"))
+        loop_kind, header = :for, iterexpr
+    end
+    Meta.isexpr(loopbody, :block) || throw(AsrDecline("loop body is not a block"))
+    loop_stmts = strip_linenums(loopbody.args)
+
+    return (loop_kind=loop_kind, loopvar=loopvar, header=header, loop_stmts=loop_stmts,
+            pre_stmts=pre_stmts, post_stmts=post_stmts)
+end
+
 function rewrite_function(funcdef, mod::Module)
     Meta.isexpr(funcdef, :function) || throw(AsrDecline("not a long-form function definition"))
     length(funcdef.args) == 2 || throw(AsrDecline("unexpected function expr shape"))
@@ -113,30 +188,24 @@ function rewrite_function(funcdef, mod::Module)
     Meta.isexpr(body, :block) || throw(AsrDecline("function body is not a block"))
 
     stmts = strip_linenums(body.args)
+    loc = locate_loop(stmts)
+    pre_stmts, header, loop_stmts, post_stmts = loc.pre_stmts, loc.header, loc.loop_stmts, loc.post_stmts
 
-    while_idxs = findall(s -> Meta.isexpr(s, :while), stmts)
-    length(while_idxs) == 1 || throw(AsrDecline("expected exactly one top-level while loop"))
-    loop_idx = while_idxs[1]
-    pre_stmts = stmts[1:loop_idx-1]
-    loop_expr = stmts[loop_idx]
-    post_stmts = stmts[loop_idx+1:end]
-
-    length(loop_expr.args) == 2 || throw(AsrDecline("unexpected while expr shape"))
-    cond, loopbody = loop_expr.args
-    Meta.isexpr(loopbody, :block) || throw(AsrDecline("while body is not a block"))
-    loop_stmts = strip_linenums(loopbody.args)
-
-    accum_plans = find_and_classify_accumulators(pre_stmts, cond, loop_stmts, post_stmts, mod)
-    check_collisions_multi(pre_stmts, cond, loop_stmts, post_stmts, accum_plans)
+    accum_plans = find_and_classify_accumulators(pre_stmts, header, loop_stmts, post_stmts, mod, loc.loop_kind, loc.loopvar)
+    check_collisions_multi(pre_stmts, header, loop_stmts, post_stmts, accum_plans, loc.loopvar)
     subs = [(ap.varname, ap.scalar_names, ap.typename, ap.fields) for ap in accum_plans]
 
     new_pre = rewrite_pre_multi(pre_stmts, accum_plans)
-    new_cond = subst_all(cond, subs)
+    new_header = subst_all(header, subs)
     new_loop_stmts = rewrite_loop_stmts_multi(loop_stmts, accum_plans, subs)
     new_post = rewrite_post_multi(post_stmts, accum_plans, subs)
 
-    new_while = Expr(:while, new_cond, Expr(:block, new_loop_stmts...))
-    new_body = Expr(:block, new_pre..., new_while, new_post...)
+    new_loop = if loc.loop_kind === :while
+        Expr(:while, new_header, Expr(:block, new_loop_stmts...))
+    else
+        Expr(:for, Expr(:(=), loc.loopvar, new_header), Expr(:block, new_loop_stmts...))
+    end
+    new_body = Expr(:block, new_pre..., new_loop, new_post...)
     return Expr(:function, sig, new_body)
 end
 
@@ -149,8 +218,16 @@ so it's tolerated for free without any special-casing). One qualifying
 accumulator is the ordinary single-accumulator case (v1); more than one
 is multi-accumulator (v1.3, e.g. a Kalman filter's coupled state and
 covariance, or two accumulators of the same type reading each other's
-old values every step)."""
-function find_and_classify_accumulators(pre_stmts, cond, loop_stmts, post_stmts, mod::Module)
+old values every step). v1.7: `loop_kind`/`loopvar` let a `for`-loop
+candidate whose own iteration variable shadows it (`for p in items`
+where `p` is also the accumulator's own name - a real hazard `while`
+never has, since `while` introduces no new binding at all) decline
+just that ONE candidate, the same way any other per-candidate
+`classify_loop` failure does, rather than crashing on the ambiguity or
+silently misattributing loop-variable references as accumulator
+references."""
+function find_and_classify_accumulators(pre_stmts, header, loop_stmts, post_stmts, mod::Module,
+                                          loop_kind::Symbol, loopvar)
     candidates = Any[]
     for s in pre_stmts
         acc = try_accumulator_stmt(s, mod)
@@ -161,7 +238,9 @@ function find_and_classify_accumulators(pre_stmts, cond, loop_stmts, post_stmts,
     plans = Any[]
     for (varname, typename, fields) in candidates
         plan = try
-            recon = classify_loop(cond, loop_stmts, varname, typename, fields, mod)
+            loop_kind === :for && loopvar === varname &&
+                throw(AsrDecline("accumulator name shadowed by the for-loop's own iteration variable"))
+            recon = classify_loop(header, loop_stmts, varname, typename, fields, mod)
             classify_post(post_stmts, varname, fields, typename, mod)
             scalar_names = Dict(f => scalar_name(varname, f) for f in fields)
             tmp_names = Dict(f => tmp_name(varname, f) for f in fields)
@@ -238,7 +317,10 @@ function resolve_type(mod::Module, typename::Symbol)
     end
 end
 
-"""Walks the while loop's condition and body for every occurrence of
+"""Walks the loop's header expression (`while`'s `cond`, checked every
+iteration in the ORIGINAL semantics, or `for`'s `iterexpr`, evaluated
+once at loop entry - v1.7 treats both identically here, since neither
+is what drives reconstruction) and body for every occurrence of
 `varname`. Returns a NamedTuple describing the single qualifying
 reconstruction: `(idx, kind=:direct, ctor_args)` for `varname =
 TypeName(...)`; `(idx, kind=:inline, qname, intermediate, int_names,
@@ -248,7 +330,7 @@ bindings terminating in a reconstruction (v1.1); or `(idx, kind=:branch,
 tree)` for an `if`/`elseif`/`else` statement whose every leaf
 independently reconstructs (v1.2, requires a mandatory terminal else -
 see `classify_branch_tree`)."""
-function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
+function classify_loop(header, loop_stmts, varname, typename, fields, mod::Module)
     recons = Any[]
     for (i, s) in enumerate(loop_stmts)
         direct = try_direct_reconstruction(s, varname, typename, fields, mod)
@@ -282,7 +364,7 @@ function classify_loop(cond, loop_stmts, varname, typename, fields, mod::Module)
         end
         check_only_field_reads(s, varname, fields, typename, mod)
     end
-    check_only_field_reads(cond, varname, fields, typename, mod)
+    check_only_field_reads(header, varname, fields, typename, mod)
     length(recons) == 1 || throw(AsrDecline("expected exactly one reconstruction assignment in loop body"))
     return recons[1]
 end
@@ -766,13 +848,20 @@ qualifying accumulator, must not occur anywhere (read or write) in the
 original function body, and no two DIFFERENT accumulators may
 synthesize the same name (the same name reused by the SAME accumulator
 across its own uses is fine and expected - only cross-accumulator
-collisions are rejected here)."""
-function check_collisions_multi(pre_stmts, cond, loop_stmts, post_stmts, accum_plans)
+collisions are rejected here). v1.7: `loopvar` (a `for`-loop's own
+iteration variable, `nothing` for `while`) is added directly - it
+isn't part of `header`/`loop_stmts`/anything else collected below (the
+header assignment's OWN target symbol, not an occurrence inside the
+checked expressions), and must still be protected even if never
+referenced inside the loop body at all (`for _unused in 1:5`-shaped
+declared-but-unread locals still occupy the name)."""
+function check_collisions_multi(pre_stmts, header, loop_stmts, post_stmts, accum_plans, loopvar)
     existing = Set{Symbol}()
     collect_all_names!(existing, Expr(:block, pre_stmts...))
-    collect_all_names!(existing, cond)
+    collect_all_names!(existing, header)
     collect_all_names!(existing, Expr(:block, loop_stmts...))
     collect_all_names!(existing, Expr(:block, post_stmts...))
+    loopvar !== nothing && push!(existing, loopvar)
 
     owner = Dict{Symbol,Int}()
     for (idx, ap) in enumerate(accum_plans)

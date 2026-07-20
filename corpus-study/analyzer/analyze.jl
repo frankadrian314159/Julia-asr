@@ -12,18 +12,35 @@ definition whose body contains at least one `for` or top-level `while`
 loop. `AsrTransform.rewrite_function`'s own precondition requires
 *exactly one* top-level `while` and no `for` at all - deliberately
 tracked as its own `shape` bucket here (`:single_while`), separate from
-`:has_for`/`:multi_while`/`:mixed`, since which of these dominates is
+`:multi_while`/`:has_for`/`:mixed`, since which of these dominates is
 itself the headline finding this study is designed to measure: Julia's
 own idiomatic style favors `for` loops far more than `while`, and
-`@asr` only ever looks at `while`.
+`@asr` (as of v1.6) only ever looks at `while`.
 
-For `:single_while` sites, pre-loop statements are scanned for a
-candidate accumulator - `varname = TypeName(args...)`, TypeName a
-capitalized Symbol, purely positional args (no kwargs/splat), mirroring
-`AsrTransform.try_accumulator_stmt`'s own shape exactly, minus the type
-resolution (`resolve_type`/`isstructtype`/`ismutabletype`/field-count
-check) that requires a real Module and is Pass 2's job. Each candidate
-is then classified by how the loop body rebuilds it:
+**`:single_for`** (a `for`-loop analog of `:single_while` - exactly one
+`for` loop, at the top level, and nothing else loop-shaped anywhere
+else in the function) is scanned for record-accumulator candidates the
+same way `:single_while` is - `classify_candidates` only looks at
+`pre_stmts`/`loop_stmts`, never at the loop header, so this costs
+nothing extra even though `AsrTransform` doesn't support `for` loops
+yet (any candidate found here still declines at Pass 2, with the
+transform's own honest "expected exactly one top-level while loop"
+reason, not a bug). This exists to answer "how many record-shaped
+candidates are hiding in `for`-loop bodies" *before* investing in
+actual qualification/rewrite support for them - 81% of all loop sites
+in this corpus are `for`-shaped and were previously never checked for
+this shape at all (an earlier version of this analyzer only ever
+populated `candidates` for `:single_while`, leaving everything else at
+a hardcoded empty list).
+
+For `:single_while`/`:single_for` sites, pre-loop statements are
+scanned for a candidate accumulator - `varname = TypeName(args...)`,
+TypeName a capitalized Symbol, purely positional args (no kwargs/splat),
+mirroring `AsrTransform.try_accumulator_stmt`'s own shape exactly,
+minus the type resolution (`resolve_type`/`isstructtype`/
+`ismutabletype`/field-count check) that requires a real Module and is
+Pass 2's job. Each candidate is then classified by how the loop body
+rebuilds it:
 
 | kind | shape | ASR-addressable? |
 |---|---|---|
@@ -120,10 +137,30 @@ function analyze_function(fdef)
     n_while = count(s -> Meta.isexpr(s, :while), stmts)
     n_for = count_for_anywhere(Expr(:block, stmts...))
     (n_while == 0 && n_for == 0) && return nothing
+    n_top_for = count(s -> Meta.isexpr(s, :for), stmts)
 
     if n_while == 1 && n_for == 0
         shape = :single_while
         loop_idx = findfirst(s -> Meta.isexpr(s, :while), stmts)
+        pre_stmts = stmts[1:loop_idx-1]
+        loopbody = stmts[loop_idx].args[2]
+        loop_stmts = Meta.isexpr(loopbody, :block) ? strip_linenums(loopbody.args) : Any[loopbody]
+        candidates = classify_candidates(pre_stmts, loop_stmts)
+        accum_kind = isempty(candidates) ? :none : candidates[1].kind
+    elseif n_while == 0 && n_top_for == 1 && n_for == 1
+        # Exactly one `for` loop, at the top level, and nothing else
+        # loop-shaped anywhere in the function (no nested for, no
+        # while) - the `for`-loop analog of `:single_while`, scanned
+        # the same way. AsrTransform doesn't support `for` loops yet
+        # (this is a Pass-1-only exploration, gated to zero at Pass 2
+        # until/unless that support exists), but Pass 1's own record-
+        # accumulator shape check is loop-shape-agnostic
+        # (`classify_candidates` only looks at pre_stmts/loop_stmts,
+        # never at the loop header itself), so scanning costs nothing
+        # extra to answer "how many are there" before investing in
+        # actual qualification/rewrite support.
+        shape = :single_for
+        loop_idx = findfirst(s -> Meta.isexpr(s, :for), stmts)
         pre_stmts = stmts[1:loop_idx-1]
         loopbody = stmts[loop_idx].args[2]
         loop_stmts = Meta.isexpr(loopbody, :block) ? strip_linenums(loopbody.args) : Any[loopbody]
@@ -194,7 +231,7 @@ function classify_candidates(pre_stmts, loop_stmts)
 end
 
 const MAP_TYPES = (:Dict, :IdDict, :OrderedDict, :WeakKeyDict)
-const COLLECTION_TYPES = (:Vector, :Array, :Set, :BitSet, :OrderedSet, :StringVector)
+const COLLECTION_TYPES = (:Vector, :Array, :Matrix, :Set, :BitSet, :OrderedSet, :StringVector)
 
 # Primitive/numeric type conversions (`UInt64(0)`, `Char(x)`, `Int(y)`)
 # are syntactically indistinguishable from a struct constructor call
@@ -203,12 +240,18 @@ const COLLECTION_TYPES = (:Vector, :Array, :Set, :BitSet, :OrderedSet, :StringVe
 # hits under an earlier, unfiltered version of this scanner (every one
 # was either this or a COLLECTION_TYPES buffer-preallocation idiom, not
 # a genuine struct). Excluded here the same way Dict/Vector/Set already
-# are, not a separate mechanism.
+# are, not a separate mechanism. `BlasInt` (LinearAlgebra's own numeric
+# type ALIAS - `isstructtype(BlasInt) == false`, it's literally `Int64`
+# or `Int32` depending on the BLAS build, not a struct at all) is the
+# same category, found by v1.7's for-loop corpus rescan: 96 of the 226
+# "no candidate found" declines in `LinearAlgebra/src/lapack.jl` alone
+# were `BlasInt(...)` ccall-argument prep, not genuine accumulators.
 const PRIMITIVE_TYPES = (
     :Int8, :Int16, :Int32, :Int64, :Int128, :Int,
     :UInt8, :UInt16, :UInt32, :UInt64, :UInt128, :UInt,
     :Float16, :Float32, :Float64,
     :Bool, :Char, :String, :Symbol, :BigInt, :BigFloat, :Complex, :Rational,
+    :BlasInt,
 )
 
 """Callee of a `TypeName(...)` or `TypeName{...}(...)` call, stripping

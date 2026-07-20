@@ -27,7 +27,7 @@ redefinition; `Revise.jl`-mediated redefinition during interactive
 development is a separate, not-yet-checked case, so this claim is
 explicitly scoped to non-Revise sessions.
 
-## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator) + v1.4 (parametric structs) + v1.5 (if-dispatch fix) + v1.6 (non-sole-argument opaque-call passthrough)
+## Status: v1 + v1.1 (interprocedural inlining) + v1.2 (branch-shaped reconstruction) + v1.3 (multi-accumulator) + v1.4 (parametric structs) + v1.5 (if-dispatch fix) + v1.6 (non-sole-argument opaque-call passthrough) + v1.7 (for-loop support)
 
 | Concept | This port |
 |---|---|
@@ -43,6 +43,7 @@ explicitly scoped to non-Revise sessions.
 | Parametric structs (v1.4, corpus-study finding) | `try_accumulator_stmt` unwraps a `UnionAll` (e.g. `InetAddr{T<:IPAddr}`) via `Base.unwrap_unionall` before checking `isstructtype`/`ismutabletype`/`fieldnames` - field shape is fixed by the struct's own declaration, never by which concrete type parameter a given call instantiates, so nothing else in the module needed to change: `typename` was already a bare Symbol everywhere, and the reconstruction call this transform emits is the same syntactic shape (`TypeName(args...)`) the original code used, letting Julia's own type-parameter inference resolve it identically either way. Requires the bare-call form (`Paramed(...)`); an explicit `Paramed{Float64}(...)` still declines, since the constructor callee is then an `Expr(:curly,...)`, not a Symbol |
 | If-dispatch fix (v1.5, corpus-study finding) | `classify_loop` no longer dispatches *any* top-level `if` statement to `classify_branch_tree` unconditionally - `if_tree_attempts_reconstruction` is a non-throwing pre-check that only commits to that stricter validation (mandatory terminal else included) when at least one leaf's own last statement actually looks like `varname = ...(...)`; an unrelated guard clause (no leaf resembling a reconstruction) falls through to the same generic `check_only_field_reads` safety check any other ordinary statement gets, so it no longer blocks a genuine reconstruction appearing later in the loop body |
 | Non-sole-argument opaque-call passthrough (v1.6, corpus-study finding) | `verify_safe_passthrough_arg` - the accumulator passed bare as one of SEVERAL arguments to a call (`bind(sock, addr)`, distinct from v1.1's `helper(varname)`-shaped sole-argument inlining) is safe when the callee's single applicable method, resolved via multiple dispatch on the accumulator's own type at that position, only reads that parameter's fields; the rewrite phase re-boxes in place (`rebox_call`) since qualification having passed guarantees no other shape can survive there. Two more, genuinely pre-existing v1.1 bugs surfaced fixing this - both invisible until tested against real stdlib source: `Method.file` reports the BUILD machine's own path for sysimage-compiled code (`resolve_source_file`), and a real source file is typically its own `module X ... end`, which the original flat top-level-only helper-source scan never recursed into (`find_all_function_defs!`) |
+| `for`-loop support (v1.7, corpus-study finding) | `locate_loop` - generalizes loop detection to `while` OR `for`, treating a `for`'s `iterexpr` (evaluated once, at entry) the same way `while`'s `cond` always was; every other mechanism (branch-shaped reconstruction, inlining, opaque-call passthrough, multi-accumulator) needed NO changes at all, since none of them ever look at the loop header - confirmed by a dedicated composition test. One new hazard: a `for`-loop's own iteration variable can shadow the accumulator's name, declined per-candidate in `find_and_classify_accumulators` rather than risk misattributing references |
 
 Motivated directly by `corpus-study/README.md`'s own findings, each
 verified against real code, not just reasoned about in the abstract:
@@ -90,17 +91,46 @@ path) and comparing output to the baseline. **The corpus study now
 shows 1 of 15 candidates qualifying** (see `corpus-study/README.md` for
 the complete, updated breakdown).
 
-Explicitly deferred: `for` loops as an alternative to `while`; mutable
-structs / direct field-mutation mode (`cpython-asr`'s v1.4 analog, 3 of
-15 corpus-study hits); two-level (chained) interprocedural inlining
-and two-level opaque-call passthrough (v1.1/v1.6 both stop at one
-level); a `while` loop wrapped in a performance macro like
-`@inbounds`/`@simd`/`@fastmath`.
+**v1.7 adds `for`-loop support** - not a shape-loosening fix like
+v1.4-v1.6, but genuinely new infrastructure, motivated by a corpus-study
+finding of a completely different kind: Pass 1's own record-accumulator
+scan had only ever been wired up for `:single_while` sites, so 86% of
+the corpus's loop-bearing functions (everything `for`-shaped - 81% of
+all loop sites, Julia's dominant idiom) were never even CHECKED for a
+record-shaped accumulator, let alone declined. Extending Pass 1 to scan
+`for`-loop bodies too (costs nothing extra - `classify_candidates` never
+looked at the loop header anyway) found **245 more real syntactic
+candidates**, all blocked by the same single structural gate. `locate_loop`
+generalizes qualification to accept either loop kind, treating `for`'s
+`iterexpr` the way `while`'s `cond` always was; `classify_loop`/
+`classify_branch_tree`/`try_inline_helper`/`verify_safe_passthrough_arg`
+needed no changes at all (confirmed via a dedicated test: branch-shaped
+reconstruction composes correctly inside a `for` loop with zero code
+changes to that mechanism). Re-running the corpus study with real
+`for`-loop qualification (not just Pass-1 scanning) **still shows only 1
+of 160 candidates qualifying** - the same real-code pattern that
+dominates the `while` set (mutable/reference-semantics objects, not
+reconstructed records) turns out to dominate the `for` set even more
+heavily: `Ref`/`RefValue` alone account for 102 of 130 "no candidate
+found" declines, and `Ref` is a structurally different, even MORE
+fundamental mismatch than "mutable struct" - it's an ABSTRACT type
+(`isabstracttype(Ref) == true`), not a concrete struct, and it mutates
+via `x[] = ...`, not `.field = ...`, so mutable-struct support alone
+wouldn't cover it either. See `corpus-study/README.md` for the full
+breakdown.
+
+Explicitly deferred: mutable structs / direct field-mutation mode
+(`cpython-asr`'s v1.4 analog); `Ref`/`RefValue` mutation-via-getindex
+(a distinct, even bigger extension than mutable-struct support - see
+above); two-level (chained) interprocedural inlining and two-level
+opaque-call passthrough (v1.1/v1.6 both stop at one level); a loop
+wrapped in a performance macro like `@inbounds`/`@simd`/`@fastmath`;
+multi-iterator `for` headers (`for i in a, j in b`).
 
 ## Layout
 
 - `src/AsrTransform.jl` - the `@asr` macro entry point, qualification (phase 1), and rewrite (phase 2)
-- `test/runtests.jl` - `Test`-based tests, 15 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, parametric struct, unrelated guard clause not blocking a later reconstruction, plus a structural check) and 30 negative/abort-safe cases, including v1.6's non-sole-argument opaque-call passthrough (long-form, short-form, ambiguous-dispatch decline, parametric-method regression) - see the module docstring and test file for the full list
+- `test/runtests.jl` - `Test`-based tests, 17 positive cases (full reconstruction, partial update, field-read guard condition, bare-return re-boxing, early return, `let`-block struct declaration, inlining with/without intermediate bindings, 2-/3-way branch-shaped reconstruction, symmetric/asymmetric multi-accumulator, parametric struct, unrelated guard clause not blocking a later reconstruction, v1.7 for-loop direct reconstruction and branch-shaped composition, plus a structural check) and 32 negative/abort-safe cases, including v1.6's non-sole-argument opaque-call passthrough (long-form, short-form, ambiguous-dispatch decline, parametric-method regression) and v1.7's for-loop shadowing/multi-iterator declines - see the module docstring and test file for the full list
 - `benchmarks/` - all 14 benchmarks from the paper's Table 1, ported from FOL's `benchmarks/fol-code/asr-*.fol`; see `benchmarks/README.md` for results, including two genuinely different findings from the other ports: near-zero measured speedup for 13 of 14 (Julia's own JIT already eliminates the allocation), and a measured *regression* (0.87x) for Kalman specifically, where ASR's own temp-staging overhead outweighs an allocation win that was already free
 - `corpus-study/` - a shape-recognizing analyzer run against Julia 1.10's *entire* Base plus 12 stdlib modules (365 files, 272K LOC - small enough to cover exhaustively, unlike the other ports' own sampled corpora), measuring ASR candidate-loop density and hand-auditing why all 15 record-shaped hits found decline; see `corpus-study/README.md`
 
