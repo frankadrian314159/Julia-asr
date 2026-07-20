@@ -80,12 +80,17 @@ roughly 23 total local bindings versus the baseline's more compact
 2-struct-plus-13-locals representation, and at that size the extra
 temp-copy indirection stops being free. This is a genuinely new kind of
 finding versus the other 13 benchmarks (and versus cpython-asr/BEAM-asr,
-where the transform never measured a regression): in a host language
-whose compiler already does the allocation-elimination work ASR is
-designed to do, the transform can occasionally cost more than it saves
-for a sufficiently large, already-optimized function - a real, concrete
-illustration of "host-compiler-dependent payoff" going *negative*, not
-just *smaller*.
+where the transform never measured a regression - `BEAM-asr`'s own
+Kalman, the exact same benchmark shape, was specifically re-checked
+across three independent runs after this result and measured a
+consistent 1.34-1.50x *speedup*, not a regression, precisely because an
+Erlang record is a real heap allocation a JIT can't unbox away, so
+there's a genuine win there for ASR's own overhead to compete against):
+in a host language whose compiler already does the allocation-elimination
+work ASR is designed to do, the transform can occasionally cost more than
+it saves for a sufficiently large, already-optimized function - a real,
+concrete illustration of "host-compiler-dependent payoff" going
+*negative*, not just *smaller*.
 
 ## Caveats (v1-v1.3 scope)
 
